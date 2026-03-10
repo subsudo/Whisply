@@ -228,23 +228,7 @@ Before publishing a release:
 - test CUDA path if NVIDIA hardware is available
 - confirm first-run setup still behaves correctly
 
-## 12. Suggested screenshots for GitHub
-
-Current screenshot set for the repository:
-- tray menu
-- settings window
-- first-run setup dialog
-- recording overlay
-
-Recommended approach for future additions:
-- Windows 11
-- clean desktop background
-- no personal information
-- English UI for public repository screenshots
-- PNG format
-- place them under `docs/screenshots/`
-
-## 13. Scope boundaries
+## 12. Scope boundaries
 
 Current product-facing backend support:
 - `cpu`
@@ -253,15 +237,3 @@ Current product-facing backend support:
 
 OpenVINO code remains in the repository for future work but is currently not presented as a primary product path.
 
-## 14. Public repository hygiene
-
-Keep these out of Git:
-- `.venv`
-- `build`
-- `dist`
-- `dist_installer`
-- `__pycache__`
-- local markers and temporary build files
-- internal handover notes
-
-Use `.gitignore` rather than deleting local development assets.
