@@ -87,6 +87,10 @@ Optional:
 .venv\Scripts\python.exe main.py
 ```
 
+## Guide
+
+For development, packaging, and troubleshooting details, see [GUIDE.md](GUIDE.md).
+
 ## Build
 
 Portable only:
