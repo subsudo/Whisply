@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "cuda_version": "cu12",
+  "download_url": "https://github.com/subsudo/whisply-runtime/releases/download/cuda-runtime-v1/cuda-runtime-cu12.zip",
+  "size_mb": 680,
+  "files": {
+    "cublas64_12.dll": "sha256:90052a83efd1b57a8e3616a6590b335855f81b814a4f16eecb7b5bf6d1b1d4eb",
+    "cublasLt64_12.dll": "sha256:c3a05ea244c937314afec09f87b91f814c7e27977681f6c67eb51bb06ced3a4a",
+    "cudnn64_9.dll": "sha256:c6de55089c4759a545ff63459c00a6223dacffa5e797109a6be2be0477fb6c5c",
+    "cudnn_ops64_9.dll": "sha256:922897bd15a66acecde7c026ecc835b0fc5662c9ae08c120fd89f0f73affa7da",
+    "cudnn_cnn64_9.dll": "sha256:acac8bf8f924ecd60928877310ba360d2ee5eb1e4ec80ff6475bf9d819d3a5c8",
+    "cudnn_graph64_9.dll": "sha256:f5453cb541402218cb5459e669db1d578656ebef394c755ab5acc2bec1165657",
+    "cudnn_heuristic64_9.dll": "sha256:3b1cb10835204fb7a45bf03aeb353842185cb2ebb34f59db20d9cb6fe5c1c556",
+    "cudnn_engines_runtime_compiled64_9.dll": "sha256:81c5e5475e386269825ae6da0652f4554fa1c58af6c90908a180314689e12350"
+  }
+}

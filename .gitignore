@@ -1,0 +1,41 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+
+# Build artifacts
+build/
+dist/
+dist_installer/
+*.spec
+installer_dist_installer.iss
+
+# Local app/runtime markers
+.first_run_complete
+nul
+
+# Internal/private project notes
+HANDOVER.md
+.claude/
+
+# IDE / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# Test / cache / coverage
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local logs
+*.log
+# Private design/spec references
+whispertype-spec.md
+mockups/

@@ -1,0 +1,48 @@
+hotkey:
+  combination: win+ctrl
+  mode: hold
+  debounce_ms: 200
+  debug_trace: false
+  debug_global: false
+audio:
+  device: null
+  sample_rate: 16000
+  channels: 1
+  vad_enabled: true
+  vad_threshold: 0.5
+  vad_min_speech_ms: 120
+whisper:
+  model: medium
+  language: de
+  backend: cuda
+  compute_type: auto
+  beam_size: 5
+  unload_after_idle_sec: 300
+  download_root: '%LOCALAPPDATA%\Whisply\models'
+overlay:
+  width: 160
+  height: 76
+  monitor_index: -1
+  opacity: 1.0
+  bottom_offset: 100
+  waveform_style: gradient
+  waveform_color: '#56F64E'
+  waveform_gradient_start: '#56F64E'
+  waveform_gradient_end: '#0096FF'
+  color_transcribing: '#FFC107'
+  transcribing_delay_ms: 250
+  transcription_timeout_ms: 45000
+  color_done: '#2196F3'
+  color_error: '#F44336'
+  display_duration_ms: 300
+insertion:
+  restore_clipboard: true
+  paste_delay_ms: 50
+  append_trailing_space: true
+general:
+  autostart: true
+  log_level: INFO
+  language_ui: de
+  log_to_file: true
+  log_dir: '%LOCALAPPDATA%\Whisply\logs'
+  log_retention_days: 14
