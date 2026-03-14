@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from html import escape
 from pathlib import Path
 import logging
 import sys
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QGuiApplication, QIcon
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -130,6 +132,25 @@ QPushButton {
 QPushButton:hover { background: #323b48; border-color: #4d5a70; }
 QPushButton:disabled { background: #1e232b; border-color: #2a303a; color: #4a5568; }
 
+QPushButton[infoButton="true"] {
+    min-width: 16px;
+    max-width: 16px;
+    min-height: 16px;
+    max-height: 16px;
+    padding: 0px;
+    border-radius: 8px;
+    background: #2a303a;
+    border: 1px solid #445066;
+    color: #9fb0c4;
+    font-size: 8pt;
+    font-weight: 700;
+}
+QPushButton[infoButton="true"]:hover {
+    background: #323b48;
+    border-color: #5b6a80;
+    color: #d4dfec;
+}
+
 QFrame[frameShape="4"] {
     background: #2d3340;
     border: none;
@@ -195,13 +216,43 @@ class SettingsDialog(QDialog):
         self.resize(500, 520)
         self.setStyleSheet(_QSS.replace("__CHECKMARK_URI__", self._checkmark_uri()))
 
+        def tooltip(text: str) -> str:
+            safe = escape(str(text or ""))
+            return (
+                "<div style='max-width: 260px; white-space: normal; "
+                "color: #d8dde8; background: #252b35;'>"
+                f"{safe}</div>"
+            )
+
         def mk_form_label(text: str) -> QLabel:
             label = QLabel(text)
             label.setFixedWidth(_FORM_LABEL_WIDTH)
             return label
 
-        def add_row(form: QFormLayout, label_text: str, field: QWidget) -> None:
-            form.addRow(mk_form_label(label_text), field)
+        def mk_form_label_with_info(text: str, tooltip_text: str | None = None) -> QWidget:
+            container = QWidget()
+            layout = QHBoxLayout(container)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(6)
+            label = QLabel(text)
+            label.setFixedWidth(_FORM_LABEL_WIDTH - (22 if tooltip_text else 0))
+            layout.addWidget(label)
+            if tooltip_text:
+                info_btn = QPushButton("i")
+                info_btn.setProperty("infoButton", True)
+                info_btn.setFocusPolicy(Qt.NoFocus)
+                info_btn.setToolTip(tooltip(tooltip_text))
+                info_btn.setCursor(Qt.PointingHandCursor)
+                layout.addWidget(info_btn)
+            layout.addStretch()
+            container.setFixedWidth(_FORM_LABEL_WIDTH)
+            return container
+
+        def add_row(form: QFormLayout, label_text: str, field: QWidget, tooltip: str | None = None) -> None:
+            if tooltip:
+                form.addRow(mk_form_label_with_info(label_text, tooltip), field)
+            else:
+                form.addRow(mk_form_label(label_text), field)
 
         whisper_cfg = config["whisper"]
         hotkey_cfg  = config["hotkey"]
@@ -234,7 +285,7 @@ class SettingsDialog(QDialog):
         self.backend_combo = QComboBox()
         self.backend_combo.addItems(["auto", "cuda", "cpu"])
         self.backend_combo.setCurrentText(str(whisper_cfg.get("backend", "auto")))
-        self.backend_combo.setToolTip(self._t("settings_backend_tooltip"))
+        self.backend_combo.setToolTip(tooltip(self._t("settings_backend_tooltip")))
 
         # ── Eingabe ───────────────────────────────────────────────────────────
         self.hotkey_input = QLineEdit()
@@ -253,10 +304,10 @@ class SettingsDialog(QDialog):
         self.hotkey_mode_combo = QComboBox()
         self.hotkey_mode_combo.addItem(self._t("settings_hotkey_mode_hold"), "hold")
         self.hotkey_mode_combo.addItem(self._t("settings_hotkey_mode_press"), "press")
-        self.hotkey_mode_combo.setToolTip(self._t("settings_hotkey_mode_tooltip"))
-        current_hotkey_mode = str(hotkey_cfg.get("mode", "hold")).strip().lower()
+        self.hotkey_mode_combo.setToolTip(tooltip(self._t("settings_hotkey_mode_tooltip")))
+        current_hotkey_mode = str(hotkey_cfg.get("mode", "press")).strip().lower()
         if current_hotkey_mode not in {"hold", "press"}:
-            current_hotkey_mode = "hold"
+            current_hotkey_mode = "press"
         for idx in range(self.hotkey_mode_combo.count()):
             if self.hotkey_mode_combo.itemData(idx) == current_hotkey_mode:
                 self.hotkey_mode_combo.setCurrentIndex(idx)
@@ -270,11 +321,11 @@ class SettingsDialog(QDialog):
         self.rescue_enabled_checkbox = QCheckBox(self._t("settings_label_rescue_enabled"))
         self.rescue_enabled_checkbox.setChecked(rescue_enabled)
         self.rescue_enabled_checkbox.toggled.connect(self._on_rescue_enabled_toggled)
-        self.rescue_enabled_checkbox.setToolTip(self._t("settings_rescue_enabled_tooltip"))
+        self.rescue_enabled_checkbox.setToolTip(tooltip(self._t("settings_rescue_enabled_tooltip")))
 
         self.rescue_timeout_spin = QSpinBox()
         self.rescue_timeout_spin.setRange(1, 999999)
-        self.rescue_timeout_spin.setToolTip(self._t("settings_rescue_timeout_tooltip"))
+        self.rescue_timeout_spin.setToolTip(tooltip(self._t("settings_rescue_timeout_tooltip")))
         self.rescue_timeout_spin.setSingleStep(10)
         self.rescue_timeout_spin.setValue(max(1, rescue_timeout))
         self.rescue_timeout_spin.setSuffix(f" {self._t('settings_unload_seconds_suffix')}")
@@ -282,7 +333,7 @@ class SettingsDialog(QDialog):
         self.rescue_never_checkbox = QCheckBox(self._t("settings_label_rescue_never"))
         self.rescue_never_checkbox.setChecked(rescue_never)
         self.rescue_never_checkbox.toggled.connect(self._on_rescue_never_toggled)
-        self.rescue_never_checkbox.setToolTip(self._t("settings_rescue_never_tooltip"))
+        self.rescue_never_checkbox.setToolTip(tooltip(self._t("settings_rescue_never_tooltip")))
 
         rescue_enabled_row = QWidget()
         rescue_enabled_layout = QHBoxLayout(rescue_enabled_row)
@@ -300,12 +351,12 @@ class SettingsDialog(QDialog):
         rescue_timeout_layout.addWidget(self.rescue_never_checkbox)
         rescue_timeout_layout.addStretch()
         rescue_timeout_row.setMinimumHeight(30)
-        rescue_timeout_row.setToolTip(self._t("settings_rescue_timeout_tooltip"))
+        rescue_timeout_row.setToolTip(tooltip(self._t("settings_rescue_timeout_tooltip")))
 
         self.ui_language_combo = QComboBox()
         self.ui_language_combo.addItem(self._t("language_name_de"), "de")
         self.ui_language_combo.addItem(self._t("language_name_en"), "en")
-        self.ui_language_combo.setToolTip(self._t("settings_ui_language_tooltip"))
+        self.ui_language_combo.setToolTip(tooltip(self._t("settings_ui_language_tooltip")))
         selected_ui = normalize_ui_language(str(general_cfg.get("language_ui", self._ui_language)))
         for idx in range(self.ui_language_combo.count()):
             if self.ui_language_combo.itemData(idx) == selected_ui:
@@ -317,17 +368,17 @@ class SettingsDialog(QDialog):
 
         self.debug_logging_checkbox = QCheckBox(self._t("settings_debug_logging"))
         self.debug_logging_checkbox.setChecked(bool(general_cfg.get("debug_logging", False)))
-        self.debug_logging_checkbox.setToolTip(self._t("settings_debug_logging_tooltip"))
+        self.debug_logging_checkbox.setToolTip(tooltip(self._t("settings_debug_logging_tooltip")))
 
         unload_after_idle_sec = int(whisper_cfg.get("unload_after_idle_sec", 300))
         self.unload_never_checkbox = QCheckBox(self._t("settings_label_unload_never"))
         self.unload_never_checkbox.setChecked(unload_after_idle_sec == 0)
         self.unload_never_checkbox.toggled.connect(self._on_unload_never_toggled)
-        self.unload_never_checkbox.setToolTip(self._t("settings_unload_never_tooltip"))
+        self.unload_never_checkbox.setToolTip(tooltip(self._t("settings_unload_never_tooltip")))
 
         self.unload_delay_spin = QSpinBox()
         self.unload_delay_spin.setRange(10, 86400)
-        self.unload_delay_spin.setToolTip(self._t("settings_unload_tooltip"))
+        self.unload_delay_spin.setToolTip(tooltip(self._t("settings_unload_tooltip")))
         self.unload_delay_spin.setSingleStep(10)
         self.unload_delay_spin.setValue(300 if unload_after_idle_sec == 0 else unload_after_idle_sec)
         self.unload_delay_spin.setSuffix(f" {self._t('settings_unload_seconds_suffix')}")
@@ -341,7 +392,7 @@ class SettingsDialog(QDialog):
         unload_layout.addWidget(self.unload_delay_spin)
         unload_layout.addWidget(self.unload_never_checkbox)
         unload_layout.addStretch()
-        unload_row.setToolTip(self._t("settings_unload_tooltip"))
+        unload_row.setToolTip(tooltip(self._t("settings_unload_tooltip")))
 
         # Autostart checkbox – shifted 9 px right to align with dropdown text
         autostart_container = QWidget()
@@ -365,14 +416,14 @@ class SettingsDialog(QDialog):
                 self.waveform_style_combo.setCurrentIndex(idx)
                 break
         self.waveform_style_combo.currentIndexChanged.connect(self._on_waveform_style_changed)
-        self.waveform_style_combo.setToolTip(self._t("settings_waveform_style_tooltip"))
+        self.waveform_style_combo.setToolTip(tooltip(self._t("settings_waveform_style_tooltip")))
 
         self.waveform_reset_button = QPushButton(self._t("settings_reset_default_colors"))
         self.waveform_reset_button.clicked.connect(self._reset_waveform_defaults)
 
         self.overlay_monitor_combo = QComboBox()
         self._populate_overlay_monitor_combo(int(overlay_cfg.get("monitor_index", -1)))
-        self.overlay_monitor_combo.setToolTip(self._t("settings_overlay_monitor_tooltip"))
+        self.overlay_monitor_combo.setToolTip(tooltip(self._t("settings_overlay_monitor_tooltip")))
 
         style_row = QFrame()
         style_layout = QHBoxLayout(style_row)
@@ -451,9 +502,19 @@ class SettingsDialog(QDialog):
         input_group = QGroupBox(self._t("settings_group_input").upper())
         input_form  = QFormLayout(input_group)
         input_form.setSpacing(4)
-        add_row(input_form, self._t("settings_label_hotkey"), hotkey_row)
+        add_row(
+            input_form,
+            self._t("settings_label_hotkey"),
+            hotkey_row,
+            self._t("settings_hotkey_info_tooltip"),
+        )
         add_row(input_form, self._t("settings_label_hotkey_mode"), self.hotkey_mode_combo)
-        add_row(input_form, self._t("settings_label_rescue_memory"), rescue_enabled_row)
+        add_row(
+            input_form,
+            self._t("settings_label_rescue_memory"),
+            rescue_enabled_row,
+            self._t("settings_rescue_memory_info_tooltip"),
+        )
         add_row(input_form, self._t("settings_label_rescue_timeout"), rescue_timeout_row)
 
         general_group = QGroupBox(self._t("settings_group_general").upper())
@@ -465,7 +526,7 @@ class SettingsDialog(QDialog):
         add_row(general_form, self._t("settings_label_unload_behavior"), unload_row)
         self.open_config_button = QPushButton(self._t("settings_open_button"))
         self.open_config_button.clicked.connect(self._handle_open_config)
-        self.open_config_button.setToolTip(self._t("settings_open_config_tooltip"))
+        self.open_config_button.setToolTip(tooltip(self._t("settings_open_config_tooltip")))
         self.open_config_button.setEnabled(self._on_open_config is not None)
         add_row(general_form, self._t("settings_open_config"), self.open_config_button)
 
@@ -501,7 +562,7 @@ class SettingsDialog(QDialog):
         footer_row.setContentsMargins(0, 0, 0, 0)
         footer_row.setSpacing(8)
         self.logs_button = QPushButton(self._t("settings_open_logs"))
-        self.logs_button.setToolTip(self._t("settings_open_logs_tooltip"))
+        self.logs_button.setToolTip(tooltip(self._t("settings_open_logs_tooltip")))
         self.logs_button.clicked.connect(self._handle_open_logs)
         self.logs_button.setEnabled(self._on_open_logs is not None)
         footer_row.addWidget(self.logs_button)

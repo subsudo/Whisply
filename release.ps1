@@ -156,10 +156,7 @@ switch ($Target) {
         Invoke-BuildPy "--portable"
     }
     "installer" {
-        $portablePath = Join-Path $projectRoot "dist\Whisply.exe"
-        if (-not (Test-Path -LiteralPath $portablePath)) {
-            Invoke-BuildPy "--portable"
-        }
+        Invoke-BuildPy "--portable"
         Invoke-InstallerBuildWithFallback $isccPath
     }
     "all" {

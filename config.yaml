@@ -1,6 +1,6 @@
 hotkey:
   combination: win+ctrl
-  mode: hold
+  mode: press
   debounce_ms: 200
   debug_trace: false
   debug_global: false
@@ -37,7 +37,7 @@ overlay:
   display_duration_ms: 300
 insertion:
   restore_clipboard: true
-  paste_delay_ms: 50
+  paste_delay_ms: 200
   append_trailing_space: true
 general:
   autostart: true

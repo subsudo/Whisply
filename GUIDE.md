@@ -190,12 +190,6 @@ Logs are technical and should stay relatively compact in normal use.
 
 Use `release.ps1`.
 
-Portable build:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\release.ps1 -Target portable
-```
-
 Installer build:
 
 ```powershell
@@ -219,7 +213,6 @@ powershell -ExecutionPolicy Bypass -File .\release.ps1 -Target all -Clean
 
 Recommended GitHub release assets:
 - `Whisply-Installer.exe` as the main download
-- optionally `Whisply.exe` as a portable fallback
 
 Before publishing a release:
 - verify `cuda_manifest.json` contains the real runtime asset URL

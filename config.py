@@ -11,7 +11,7 @@ from paths import get_config_path, get_log_dir, get_model_dir
 DEFAULT_CONFIG: dict[str, Any] = {
     "hotkey": {
         "combination": "win+ctrl",
-        "mode": "hold",
+        "mode": "press",
         "debounce_ms": 200,
         "debug_trace": False,
         "debug_global": False,
@@ -31,6 +31,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "compute_type": "auto",
         "beam_size": 5,
         "unload_after_idle_sec": 300,
+        "unload_after_idle_prev_sec": 300,
         "download_root": str(get_model_dir()),
     },
     "overlay": {
@@ -52,7 +53,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "insertion": {
         "restore_clipboard": True,
-        "paste_delay_ms": 50,
+        "paste_delay_ms": 200,
         "append_trailing_space": True,
         "rescue_enabled": True,
         "rescue_timeout_sec": 120,

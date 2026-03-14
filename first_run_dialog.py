@@ -245,6 +245,8 @@ class FirstRunSetupDialog(QDialog):
         self.failed_models: list[str] = []
         self.restart_recommended = False
         self._selected_install_models: list[str] = []
+        self._active_model_index = 0
+        self._active_model_progress = 0
 
         self.setWindowTitle(self._t("first_run_title"))
         self._set_window_icon()
@@ -429,6 +431,8 @@ class FirstRunSetupDialog(QDialog):
         self.cuda_progress.setValue(0)
         self.models_progress.setValue(0)
         self.current_model_progress.setValue(0)
+        self._active_model_index = 0
+        self._active_model_progress = 0
         self._selected_install_models = list(selected_models)
 
         self._worker = _FirstRunWorker(
@@ -440,7 +444,7 @@ class FirstRunSetupDialog(QDialog):
         )
         self._worker.cuda_progress.connect(self.cuda_progress.setValue)
         self._worker.model_started.connect(self._on_model_started)
-        self._worker.model_progress.connect(self.current_model_progress.setValue)
+        self._worker.model_progress.connect(self._on_model_progress)
         self._worker.model_done.connect(self._on_model_done)
         self._worker.done.connect(self._on_done)
         self._worker.start()
@@ -448,6 +452,15 @@ class FirstRunSetupDialog(QDialog):
     def _on_model_started(self, model: str, index: int, total: int) -> None:
         self.current_model_label.setText(f"{model} ({index}/{total})")
         self.current_model_progress.setValue(0)
+        self._active_model_index = max(1, index)
+        self._active_model_progress = 0
+        self._update_models_progress()
+
+    def _on_model_progress(self, progress: int) -> None:
+        clamped = max(0, min(100, int(progress)))
+        self._active_model_progress = clamped
+        self.current_model_progress.setValue(clamped)
+        self._update_models_progress()
 
     def _on_model_done(self, model: str, ok: bool, reason: str) -> None:
         if ok:
@@ -456,9 +469,24 @@ class FirstRunSetupDialog(QDialog):
         else:
             if model not in self.failed_models:
                 self.failed_models.append(model)
+        self._active_model_progress = 100
+        self.current_model_progress.setValue(100)
+        self._update_models_progress(force_done=True)
+
+    def _update_models_progress(self, force_done: bool = False) -> None:
+        total = len(self._selected_install_models)
+        if total <= 0:
+            self.models_progress.setValue(0)
+            return
+
         done = len(self.installed_models) + len(self.failed_models)
-        total = max(1, len(self._selected_install_models))
-        self.models_progress.setValue(int((done / total) * 100))
+        if force_done:
+            overall = done / total
+        else:
+            current_fraction = self._active_model_progress / 100.0 if self._active_model_index > 0 else 0.0
+            completed_before_current = min(done, max(0, self._active_model_index - 1))
+            overall = (completed_before_current + current_fraction) / total
+        self.models_progress.setValue(int(max(0.0, min(1.0, overall)) * 100))
 
     def _on_done(self, cuda_attempted: bool, cuda_ok: bool, installed: list, failed: list) -> None:
         self.cuda_attempted = bool(cuda_attempted)

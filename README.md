@@ -42,9 +42,6 @@ For end users, use the GitHub Releases page.
 Recommended download:
 - `Whisply-Installer.exe`
 
-Optional:
-- `Whisply.exe` as portable build
-
 ## Requirements
 
 Runtime:
@@ -92,12 +89,6 @@ Optional:
 For development, packaging, and troubleshooting details, see [GUIDE.md](GUIDE.md).
 
 ## Build
-
-Portable only:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\release.ps1 -Target portable
-```
 
 Installer only:
 

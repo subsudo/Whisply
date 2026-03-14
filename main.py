@@ -383,15 +383,15 @@ class WhisperTypeApp:
 
     def _normalize_hotkey_mode(self) -> None:
         hotkey_cfg = self.config.setdefault("hotkey", {})
-        mode = str(hotkey_cfg.get("mode", "hold")).strip().lower()
+        mode = str(hotkey_cfg.get("mode", "press")).strip().lower()
         if mode not in {"hold", "press"}:
-            hotkey_cfg["mode"] = "hold"
+            hotkey_cfg["mode"] = "press"
             self.config_manager.save(self.config)
 
     def _hotkey_mode(self) -> str:
-        mode = str(self.config.get("hotkey", {}).get("mode", "hold")).strip().lower()
+        mode = str(self.config.get("hotkey", {}).get("mode", "press")).strip().lower()
         if mode not in {"hold", "press"}:
-            return "hold"
+            return "press"
         return mode
 
     def _normalize_backend_choice(self) -> None:
@@ -721,6 +721,28 @@ class WhisperTypeApp:
         except Exception:
             logging.exception("Failed to query model-loaded state.")
             return False
+
+    def _unload_never_enabled(self) -> bool:
+        try:
+            return int(self.config["whisper"].get("unload_after_idle_sec", 300)) == 0
+        except Exception:
+            logging.exception("Failed to query unload-never state.")
+            return False
+
+    def _toggle_unload_never_from_tray(self) -> None:
+        whisper_cfg = self.config["whisper"]
+        current = int(whisper_cfg.get("unload_after_idle_sec", 300))
+        previous = int(whisper_cfg.get("unload_after_idle_prev_sec", 300) or 300)
+        if current == 0:
+            restore = previous if previous > 0 else 300
+            whisper_cfg["unload_after_idle_sec"] = restore
+            logging.info("Tray unload-never disabled; restored timeout=%s sec.", restore)
+        else:
+            whisper_cfg["unload_after_idle_prev_sec"] = current
+            whisper_cfg["unload_after_idle_sec"] = 0
+            logging.info("Tray unload-never enabled; previous timeout=%s sec.", current)
+        self.config_manager.save(self.config)
+        self.tray.refresh_status()
 
     def _unload_model_from_tray(self) -> None:
         if self._transcription_in_progress or self.recorder.is_running:
@@ -1057,6 +1079,7 @@ class WhisperTypeApp:
             if unload_after_idle_sec == 0:
                 logging.info("Unload setting changed to never.")
             else:
+                self.config["whisper"]["unload_after_idle_prev_sec"] = unload_after_idle_sec
                 logging.info("Unload setting changed to %d sec.", unload_after_idle_sec)
 
         self.config["insertion"]["rescue_enabled"] = rescue_enabled
@@ -1083,6 +1106,11 @@ class WhisperTypeApp:
             logging.info("Debug logging changed to %s.", debug_logging)
 
         self.config_manager.save(self.config)
+        logging.info("Settings saved to config. Scheduling deferred tray/overlay refresh.")
+        QTimer.singleShot(0, self._apply_settings_ui_refresh)
+
+    def _apply_settings_ui_refresh(self) -> None:
+        logging.info("Deferred settings UI refresh started.")
         self.tray.set_selected(
             model=self.config["whisper"]["model"],
             transcription_language=self.config["whisper"]["language"],
@@ -1096,6 +1124,7 @@ class WhisperTypeApp:
         self.overlay.cfg["monitor_index"] = int(self.config["overlay"].get("monitor_index", -1))
         self.overlay.place_bottom_center()
         self.tray.refresh_status()
+        logging.info("Deferred settings UI refresh completed.")
 
     def _setup_tray(self) -> None:
         icon_path = str(Path("assets/icon.png"))
@@ -1113,7 +1142,9 @@ class WhisperTypeApp:
             on_audio_device=self._on_audio_device_change,
             on_open_settings=self._open_settings,
             unload_available_provider=self._unload_available,
+            unload_never_provider=self._unload_never_enabled,
             on_unload_model=self._unload_model_from_tray,
+            on_toggle_unload_never=self._toggle_unload_never_from_tray,
             rescue_copy_available_provider=self._rescue_copy_available,
             on_copy_last_dictation=self._copy_last_dictation_to_clipboard,
             on_quit=self.shutdown,

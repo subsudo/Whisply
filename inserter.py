@@ -12,6 +12,7 @@ log = logging.getLogger(__name__)
 VK_CONTROL = 0x11
 VK_V = 0x56
 KEYEVENTF_KEYUP = 0x0002
+_MIN_SAFE_RESTORE_DELAY_MS = 200
 
 
 class GUITHREADINFO(ctypes.Structure):
@@ -134,11 +135,13 @@ class TextInserter:
             except Exception:
                 original = None
 
+        restore_delay_ms = max(_MIN_SAFE_RESTORE_DELAY_MS, int(self.paste_delay_ms))
+
         try:
             pyperclip.copy(text)
             time.sleep(0.02)
             _send_ctrl_v()
-            time.sleep(self.paste_delay_ms / 1000.0)
+            time.sleep(restore_delay_ms / 1000.0)
         finally:
             if self.restore_clipboard and original is not None:
                 time.sleep(0.05)
