@@ -4,7 +4,7 @@ from collections.abc import Callable
 import math
 
 from PySide6.QtCore import QPoint, QRect, QTimer, Qt
-from PySide6.QtGui import QColor, QFontMetrics, QLinearGradient, QPainter
+from PySide6.QtGui import QColor, QFontMetrics, QLinearGradient, QPainter, QPainterPath
 from PySide6.QtWidgets import QApplication, QWidget
 
 # ── Bar count & idle animation ────────────────────────────────────────────────
@@ -46,9 +46,12 @@ class OverlayWidget(QWidget):
         self.cfg    = config
         self.state  = "idle"
         self.message = ""
+        self._message_level = "notice"
         self._phase  = 0.0          # used for transcribing / model-warmup animation
         self._fade   = 0.0
         self._fade_target = 0.0
+        self._base_width = int(config["width"])
+        self._base_height = int(config["height"])
 
         self._error_fade_timer:       QTimer | None = None
         self._warmup_finish_timer:    QTimer | None = None
@@ -56,7 +59,9 @@ class OverlayWidget(QWidget):
         self._warmup_finish_step      = 0.0
         self._warmup_finish_remaining_steps = 0
         self._warmup_finish_callback: Callable[[], None] | None = None
+        self._loading_completion_callback: Callable[[], None] | None = None
         self._loading_progress = 0
+        self._display_loading_progress = 0.0
 
         # ── per-bar state (reset on show_recording) ───────────────────────────
         self._bar_targets        = [0.0] * _BARS   # normalised/compressed target
@@ -64,7 +69,7 @@ class OverlayWidget(QWidget):
         self._bar_peaks          = [_INITIAL_BAR_PEAK] * _BARS  # adaptive peak
         self._idle_phase         = 0.0             # drives breathing wave
 
-        self.setFixedSize(config["width"], config["height"])
+        self.setFixedSize(self._base_width, self._base_height)
         self.setWindowFlags(
             Qt.FramelessWindowHint
             | Qt.Tool
@@ -114,8 +119,10 @@ class OverlayWidget(QWidget):
     def show_recording(self) -> None:
         self._cancel_error_timer()
         self._cancel_model_warmup_finish()
+        self._loading_completion_callback = None
         self.state   = "recording"
         self.message = ""
+        self._reset_overlay_size()
         self._bar_targets        = [0.0] * _BARS
         self._bar_display_levels = [0.0] * _BARS
         self._bar_peaks          = [_INITIAL_BAR_PEAK] * _BARS
@@ -126,8 +133,10 @@ class OverlayWidget(QWidget):
     def show_transcribing(self) -> None:
         self._cancel_error_timer()
         self._cancel_model_warmup_finish()
+        self._loading_completion_callback = None
         self.state   = "transcribing"
         self.message = ""
+        self._reset_overlay_size()
         self._phase  = 0.0
         self.place_bottom_center()
         self._begin_fade_in()
@@ -135,18 +144,24 @@ class OverlayWidget(QWidget):
     def show_loading(self, msg: str) -> None:
         self._cancel_error_timer()
         self._cancel_model_warmup_finish()
+        self._loading_completion_callback = None
         self.state   = "loading"
         self.message = msg
+        self._reset_overlay_size()
         self._loading_progress = 0
+        self._display_loading_progress = 0.0
         self.place_bottom_center()
         self._begin_fade_in()
 
     def show_model_warmup(self, msg: str) -> None:
         self._cancel_error_timer()
         self._cancel_model_warmup_finish()
+        self._loading_completion_callback = None
         self.state   = "model_warmup"
         self.message = msg
+        self._reset_overlay_size()
         self._loading_progress = 0
+        self._display_loading_progress = 0.0
         self._phase  = 0.0
         self.place_bottom_center()
         self._begin_fade_in()
@@ -160,13 +175,36 @@ class OverlayWidget(QWidget):
         _ = ms
         self._cancel_error_timer()
         self._cancel_model_warmup_finish()
+        self._loading_completion_callback = None
+        if self.state == "transcribing":
+            self.hide_immediate()
+            return
+        if self.state == "loading":
+            self.set_loading_progress(100)
+            if self._display_loading_progress >= 99.5:
+                self._begin_fade_out()
+            else:
+                self._loading_completion_callback = self._begin_fade_out
+            return
         self._begin_fade_out()
 
     def show_error(self, msg: str, ms: int = 2000) -> None:
+        self._show_message(msg=msg, ms=ms, level="error")
+
+    def show_warning(self, msg: str, ms: int = 1800) -> None:
+        self._show_message(msg=msg, ms=ms, level="warning")
+
+    def show_notice(self, msg: str, ms: int = 1600) -> None:
+        self._show_message(msg=msg, ms=ms, level="notice")
+
+    def _show_message(self, msg: str, ms: int, level: str) -> None:
         self._cancel_error_timer()
         self._cancel_model_warmup_finish()
-        self.state   = "error"
+        self._loading_completion_callback = None
+        self.state   = "message"
         self.message = msg
+        self._message_level = str(level or "notice")
+        self._resize_for_message(msg)
         self.place_bottom_center()
         self._begin_fade_in()
         if self._error_fade_timer is None:
@@ -190,6 +228,7 @@ class OverlayWidget(QWidget):
             self._bar_targets[i] = max(0.0, min(compressed * _MAX_VISUAL_LEVEL, _MAX_VISUAL_LEVEL))
 
     def finish_model_warmup(self, ms: int = 220, on_finished: Callable[[], None] | None = None) -> None:
+        _ = ms
         if self.state != "model_warmup":
             if on_finished is not None:
                 on_finished()
@@ -197,24 +236,16 @@ class OverlayWidget(QWidget):
 
         self._cancel_model_warmup_finish()
         self._warmup_finish_callback = on_finished
-        if self._loading_progress >= 100:
-            if self._warmup_finish_callback is not None:
-                callback = self._warmup_finish_callback
-                self._warmup_finish_callback = None
-                callback()
-            return
+        self._loading_completion_callback = self._complete_model_warmup_finish
+        self.set_loading_progress(100)
+        if self._display_loading_progress >= 99.5:
+            self._complete_loading_completion()
 
-        duration_ms = max(40, int(ms))
-        tick_ms     = 16
-        steps       = max(1, duration_ms // tick_ms)
-        self._warmup_finish_progress         = float(self._loading_progress)
-        self._warmup_finish_remaining_steps  = steps
-        self._warmup_finish_step             = (100.0 - self._warmup_finish_progress) / float(steps)
-
-        if self._warmup_finish_timer is None:
-            self._warmup_finish_timer = QTimer(self)
-            self._warmup_finish_timer.timeout.connect(self._on_model_warmup_finish_tick)
-        self._warmup_finish_timer.start(tick_ms)
+    def _complete_model_warmup_finish(self) -> None:
+        callback = self._warmup_finish_callback
+        self._warmup_finish_callback = None
+        if callback is not None:
+            callback()
 
     def _on_model_warmup_finish_tick(self) -> None:
         if self.state != "model_warmup":
@@ -254,11 +285,14 @@ class OverlayWidget(QWidget):
     def hide_immediate(self) -> None:
         self._cancel_error_timer()
         self._cancel_model_warmup_finish()
+        self._loading_completion_callback = None
         self._fade        = 0.0
         self._fade_target = 0.0
+        self._reset_overlay_size()
         self._bar_display_levels = [0.0] * _BARS
         self._bar_targets        = [0.0] * _BARS
         self._loading_progress   = 0
+        self._display_loading_progress = 0.0
         self.setWindowOpacity(0.0)
         if self.isVisible():
             self.hide()
@@ -285,6 +319,55 @@ class OverlayWidget(QWidget):
         self._warmup_finish_remaining_steps = 0
         self._warmup_finish_callback        = None
 
+    def _complete_loading_completion(self) -> None:
+        callback = self._loading_completion_callback
+        self._loading_completion_callback = None
+        if callback is not None:
+            callback()
+
+    def _reset_overlay_size(self) -> None:
+        self.setFixedSize(self._base_width, self._base_height)
+
+    def _resize_for_message(self, msg: str) -> None:
+        font = self.font()
+        font.setPointSize(9)
+        font.setBold(True)
+        metrics = QFontMetrics(font)
+        target_width = max(self._base_width, min(420, metrics.horizontalAdvance(str(msg or "")) + 40))
+        self.setFixedSize(target_width, self._base_height)
+
+    def _advance_loading_display_progress(self) -> None:
+        raw = float(max(0, min(self._loading_progress, 100)))
+        display = float(self._display_loading_progress)
+
+        if raw >= 100.0:
+            if display < 85.0:
+                step = 0.90
+            elif display < 97.0:
+                step = 0.65
+            else:
+                step = 0.35
+            self._display_loading_progress = min(100.0, display + step)
+            return
+
+        if display < 30.0:
+            base_step = 0.38
+        elif display < 60.0:
+            base_step = 0.30
+        elif display < 85.0:
+            base_step = 0.22
+        elif display < 95.0:
+            base_step = 0.14
+        else:
+            base_step = 0.06
+
+        gap_boost = min(0.30, max(0.0, raw - display) * 0.03)
+        self._display_loading_progress = min(99.0, display + base_step + gap_boost)
+
+    def _advance_model_warmup_display_progress(self) -> None:
+        target = float(max(0, min(self._loading_progress, 100)))
+        self._display_loading_progress = target
+
     # ── tick / animation loop ────────────────────────────────────────────────
 
     def _tick(self) -> None:
@@ -294,6 +377,15 @@ class OverlayWidget(QWidget):
 
         if self.state == "transcribing":
             self._phase += 0.112
+
+        if self.state == "loading":
+            self._advance_loading_display_progress()
+            if self._loading_completion_callback is not None and self._loading_progress >= 100 and self._display_loading_progress >= 99.5:
+                self._complete_loading_completion()
+        elif self.state == "model_warmup":
+            self._advance_model_warmup_display_progress()
+            if self._loading_completion_callback is not None and self._display_loading_progress >= 99.5:
+                self._complete_loading_completion()
 
         if self.state == "recording":
             is_idle = max(self._bar_targets) < _ANIMATION_IDLE_CUTOFF
@@ -347,8 +439,8 @@ class OverlayWidget(QWidget):
             self._paint_model_warmup(painter)
         elif self.state == "transcribing":
             self._paint_transcribing(painter)
-        elif self.state == "error":
-            self._paint_error(painter)
+        elif self.state == "message":
+            self._paint_message(painter)
 
     # ── recording: FFT spectrum bars ─────────────────────────────────────────
 
@@ -402,7 +494,7 @@ class OverlayWidget(QWidget):
     def _paint_model_warmup(self, painter: QPainter) -> None:
         pill_rect    = self._paint_pill_background(painter, alpha=145)
         content_rect = pill_rect.adjusted(8, 5, -8, -5)
-        fill_ratio   = max(0.0, min(self._loading_progress / 100.0, 1.0))
+        fill_ratio   = max(0.0, min(self._display_loading_progress / 100.0, 1.0))
         self._draw_transcribing_bars(
             painter=painter,
             content_rect=content_rect,
@@ -410,6 +502,25 @@ class OverlayWidget(QWidget):
             fill_ratio=fill_ratio,
             paint_base=True,
         )
+
+    def _transcribing_bar_rects(self, content_rect: QRect, phase: float) -> list[tuple[int, int, int, int]]:
+        w       = max(1, content_rect.width())
+        h       = max(1, content_rect.height())
+        spacing = w / _BARS
+        bar_w   = max(3, int(spacing * 0.55))
+        rects: list[tuple[int, int, int, int]] = []
+
+        for i in range(_BARS):
+            drift = math.sin(phase * 2.6 - i * 0.72)
+            amp   = 0.52 + 0.30 * drift
+            edge_gain = _EDGE_ENVELOPE[i]
+            bar_h = max(3.0, min(h * 0.88 * amp * edge_gain, h * 0.92))
+            draw_h = max(3, int(round(bar_h)))
+            x = int(round(content_rect.left() + i * spacing + (spacing - bar_w) * 0.5))
+            y = int(round(content_rect.top() + h * 0.50 - draw_h / 2.0))
+            rects.append((x, y, bar_w, draw_h))
+
+        return rects
 
     def _draw_transcribing_bars(
         self,
@@ -422,20 +533,17 @@ class OverlayWidget(QWidget):
         painter.setPen(Qt.NoPen)
 
         w       = max(1, content_rect.width())
-        h       = max(1, content_rect.height())
-        spacing = w / _BARS
-        bar_w   = max(3, int(spacing * 0.55))
+        bar_rects = self._transcribing_bar_rects(
+            content_rect=content_rect,
+            phase=self._phase if animated else 0.0,
+        )
+        bar_w = bar_rects[0][2] if bar_rects else max(3, int((w / _BARS) * 0.55))
         corner  = min(bar_w / 2.0, 5.0)
 
         if paint_base:
             painter.setBrush(QColor(255, 255, 255, 38))
-            for i in range(_BARS):
-                drift = math.sin(-i * 0.72)
-                amp   = 0.52 + 0.30 * drift
-                bar_h = max(3, min(h * 0.88 * amp, h * 0.92))
-                x = int(content_rect.left() + i * spacing + (spacing - bar_w) * 0.5)
-                y = int(content_rect.top() + h * 0.50 - bar_h / 2)
-                painter.drawRoundedRect(x, y, bar_w, int(bar_h), corner, corner)
+            for x, y, rect_w, rect_h in bar_rects:
+                painter.drawRoundedRect(x, y, rect_w, rect_h, corner, corner)
 
         fill_px = int(w * max(0.0, min(fill_ratio, 1.0)))
         if fill_px <= 0:
@@ -447,23 +555,20 @@ class OverlayWidget(QWidget):
         painter.save()
         painter.setBrush(gradient)
 
-        for i in range(_BARS):
-            phase = self._phase if animated else 0.0
-            drift = math.sin(phase * 2.6 - i * 0.72)
-            amp   = 0.52 + 0.30 * drift
-            edge_gain = _EDGE_ENVELOPE[i]
-            bar_h = max(3, min(h * 0.88 * amp * edge_gain, h * 0.92))
-            x = int(content_rect.left() + i * spacing + (spacing - bar_w) * 0.5)
-            y = int(content_rect.top() + h * 0.50 - bar_h / 2)
-
+        for x, y, rect_w, rect_h in bar_rects:
             if animated:
-                painter.drawRoundedRect(x, y, bar_w, int(bar_h), corner, corner)
+                painter.drawRoundedRect(x, y, rect_w, rect_h, corner, corner)
                 continue
 
-            filled_w = max(0, min(bar_w, fill_end - x))
+            filled_w = max(0, min(rect_w, fill_end - x))
             if filled_w <= 0:
                 continue
-            painter.drawRoundedRect(x, y, int(filled_w), int(bar_h), corner, corner)
+            clip_path = QPainterPath()
+            clip_path.addRoundedRect(float(x), float(y), float(rect_w), float(rect_h), corner, corner)
+            painter.save()
+            painter.setClipPath(clip_path)
+            painter.fillRect(x, y, int(filled_w), rect_h, gradient)
+            painter.restore()
         painter.restore()
 
     # ── loading bar ──────────────────────────────────────────────────────────
@@ -480,8 +585,9 @@ class OverlayWidget(QWidget):
         metrics = QFontMetrics(font)
         msg = self.message or "Loading model"
         msg = metrics.elidedText(msg, Qt.ElideRight, max(10, text_rect.width() - 52))
+        display_progress = int(round(max(0.0, min(self._display_loading_progress, 100.0))))
         painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, msg)
-        painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignRight, f"{self._loading_progress}%")
+        painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignRight, f"{display_progress}%")
 
         bar_rect = QRect(
             pill_rect.left() + 24,
@@ -495,7 +601,7 @@ class OverlayWidget(QWidget):
 
         if bar_rect.width() <= 4:
             return
-        fill_w = int((bar_rect.width() * self._loading_progress) / 100.0)
+        fill_w = int((bar_rect.width() * max(0.0, min(self._display_loading_progress, 100.0))) / 100.0)
         if fill_w <= 0:
             return
         seg_rect = QRect(bar_rect.left(), bar_rect.top(), fill_w, bar_rect.height())
@@ -540,22 +646,30 @@ class OverlayWidget(QWidget):
     # ── pill background ──────────────────────────────────────────────────────
 
     def _paint_pill_background(self, painter: QPainter, alpha: int) -> QRect:
-        bg     = QColor(0, 0, 0, max(0, min(alpha, 255)))
         rect   = self.rect().adjusted(6, 4, -6, -4)
         radius = rect.height() / 2
-        painter.setPen(Qt.NoPen)
+        bg = QColor(7, 10, 15, max(0, min(alpha, 255)))
+        edge = QColor(42, 50, 64, 48)
+        painter.setPen(edge)
         painter.setBrush(bg)
         painter.drawRoundedRect(rect, radius, radius)
         return rect
 
-    # ── error ────────────────────────────────────────────────────────────────
+    # ── message ──────────────────────────────────────────────────────────────
 
-    def _paint_error(self, painter: QPainter) -> None:
+    def _paint_message(self, painter: QPainter) -> None:
         pill_rect = self._paint_pill_background(painter, alpha=145)
-        color     = QColor(self.cfg["color_error"])
+        if self._message_level == "error":
+            color = QColor(self.cfg["color_error"])
+        elif self._message_level == "warning":
+            color = QColor(str(self.cfg.get("color_transcribing", "#FFC107")))
+        else:
+            color = QColor(str(self.cfg.get("color_done", "#2196F3")))
         painter.setPen(color)
         font = painter.font()
         font.setPointSize(9)
         font.setBold(True)
         painter.setFont(font)
-        painter.drawText(pill_rect, Qt.AlignCenter, self.message)
+        metrics = QFontMetrics(font)
+        msg = metrics.elidedText(self.message, Qt.ElideRight, max(20, pill_rect.width() - 26))
+        painter.drawText(pill_rect.adjusted(12, 0, -12, 0), Qt.AlignCenter, msg)

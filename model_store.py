@@ -62,6 +62,7 @@ _MODEL_REPOS = {
 _MODEL_REQUIRED_FILES = ("model.bin", "config.json", "tokenizer.json")
 _MODEL_OPTIONAL_FILES = ("preprocessor_config.json",)
 _VOCABULARY_CANDIDATES = ("vocabulary.txt", "vocabulary.json", "vocabulary.bin")
+_MODEL_SIZE_ESTIMATE_CACHE: dict[str, int] = {}
 
 
 def _normalize_model(model: str) -> str:
@@ -281,13 +282,42 @@ def _safe_stat_size(path: Path) -> int:
 
 
 def _estimate_model_download_bytes(model_size: str) -> int:
+    normalized = _normalize_model(model_size)
+    cached = _MODEL_SIZE_ESTIMATE_CACHE.get(normalized)
+    if cached and cached > 0:
+        return int(cached)
+
+    repos = _MODEL_REPOS.get(normalized, ())
+    for repo_id in repos:
+        try:
+            from huggingface_hub import HfApi  # type: ignore
+
+            files_to_download, _ = _resolve_repo_files(repo_id)
+            info = HfApi().model_info(repo_id, files_metadata=True, timeout=5)
+            siblings = getattr(info, "siblings", None) or []
+            size_map = {
+                str(getattr(sibling, "rfilename", "")).lower(): int(getattr(sibling, "size", 0) or 0)
+                for sibling in siblings
+            }
+            total = 0
+            for name in files_to_download:
+                total += max(0, size_map.get(str(name).lower(), 0))
+            if total > 0:
+                _MODEL_SIZE_ESTIMATE_CACHE[normalized] = int(total)
+                return int(total)
+        except Exception as exc:
+            log.debug("Could not resolve metadata-based size estimate for %s (%s): %s", normalized, repo_id, exc)
+
     estimates = {
         "small": 550 * 1024 * 1024,
         "medium": 1600 * 1024 * 1024,
         "large-v3": 3200 * 1024 * 1024,
         "large-v3-turbo": 1700 * 1024 * 1024,
     }
-    return int(estimates.get(model_size, 0))
+    fallback = int(estimates.get(normalized, 0))
+    if fallback > 0:
+        _MODEL_SIZE_ESTIMATE_CACHE[normalized] = fallback
+    return fallback
 
 
 def _materialise_real_file(file_path: Path) -> bool:

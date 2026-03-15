@@ -110,7 +110,7 @@ def _register_cuda_dll_paths() -> None:
 
 _register_cuda_dll_paths()
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QObject, QTimer, Signal, qInstallMessageHandler
 from PySide6.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon
 
 from config import ConfigManager
@@ -163,16 +163,33 @@ class EventBridge(QObject):
     model_install_finished = Signal(str, bool, str)
 
 
+class CrashSafeFileHandler(logging.FileHandler):
+    """File handler that flushes and fsyncs each record for crash debugging."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        super().emit(record)
+        try:
+            self.flush()
+            if self.stream and hasattr(self.stream, "fileno"):
+                os.fsync(self.stream.fileno())
+        except Exception:
+            pass
+
+
 class WhisperTypeApp:
     def __init__(self) -> None:
         self._shutting_down = False
         self._fault_log_handle = None
+        self._debug_trace_handle = None
+        self._debug_state_path: Path | None = None
+        self._qt_message_handler_installed = False
         self._config_path = get_config_path()
         self._migrate_legacy_config_file(self._config_path)
         self.config_manager = ConfigManager(self._config_path)
         self.config = self.config_manager.load()
         self._normalize_storage_paths()
         self._setup_logging()
+        self._setup_debug_trace()
         self._install_global_exception_hooks()
         self._install_fault_handler()
         log = logging.getLogger(__name__)
@@ -187,6 +204,7 @@ class WhisperTypeApp:
         log.info("Starting %s ...", self._t("app_name"))
         log.info("Creating Qt application")
         self.qt_app = QApplication(sys.argv)
+        self._install_qt_message_handler()
         self.qt_app.setQuitOnLastWindowClosed(False)
         self.qt_app.screenAdded.connect(self._on_screen_added)
         self.qt_app.screenRemoved.connect(self._on_screen_removed)
@@ -487,6 +505,12 @@ class WhisperTypeApp:
         for handler in root.handlers:
             handler.setLevel(level)
 
+    def _reconfigure_runtime_logging(self) -> None:
+        self._setup_logging()
+        self._setup_debug_trace()
+        self._apply_logging_level()
+        logging.info("Runtime logging reconfigured. debug=%s", self._debug_logging_enabled())
+
     def _setup_logging(self) -> None:
         level = self._effective_log_level()
         handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
@@ -498,7 +522,10 @@ class WhisperTypeApp:
             retention_days = int(self.config["general"].get("log_retention_days", 14))
             self._cleanup_old_logs(log_dir, retention_days)
             log_file = log_dir / f"whisply-{time.strftime('%Y%m%d')}.log"
-            handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
+            if bool(self.config.get("general", {}).get("debug_logging", False)):
+                handlers.append(CrashSafeFileHandler(log_file, encoding="utf-8"))
+            else:
+                handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
 
         logging.basicConfig(
             level=level,
@@ -506,6 +533,123 @@ class WhisperTypeApp:
             handlers=handlers,
             force=True,
         )
+
+    def _debug_logging_enabled(self) -> bool:
+        return bool(self.config.get("general", {}).get("debug_logging", False))
+
+    def _setup_debug_trace(self) -> None:
+        self._close_debug_trace()
+        if not self._debug_logging_enabled():
+            return
+        if not bool(self.config["general"].get("log_to_file", True)):
+            return
+        try:
+            raw_log_dir = self.config["general"].get("log_dir") or str(get_log_dir())
+            log_dir = resolve_user_path(raw_log_dir)
+            log_dir.mkdir(parents=True, exist_ok=True)
+            self._debug_state_path = log_dir / "whisply-last-critical.json"
+            trace_path = log_dir / "whisply-debug-trace.log"
+            self._debug_trace_handle = open(trace_path, "a", encoding="utf-8", buffering=1)
+            self._debug_trace("debug_session_started")
+            self._recover_debug_state()
+        except Exception:
+            logging.exception("Failed to initialise debug trace logging.")
+
+    def _close_debug_trace(self) -> None:
+        if self._debug_trace_handle is not None:
+            try:
+                self._debug_trace_handle.flush()
+                self._debug_trace_handle.close()
+            except Exception:
+                pass
+            finally:
+                self._debug_trace_handle = None
+        self._debug_state_path = None
+
+    def _debug_trace(self, event: str, **fields: object) -> None:
+        if self._debug_trace_handle is None:
+            return
+        try:
+            payload = {
+                "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "event": str(event),
+                "fields": fields,
+            }
+            self._debug_trace_handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            self._debug_trace_handle.flush()
+            os.fsync(self._debug_trace_handle.fileno())
+        except Exception:
+            logging.exception("Failed to write debug trace event: %s", event)
+
+    def _debug_set_critical_step(self, step: str, **fields: object) -> None:
+        if self._debug_state_path is None:
+            return
+        payload = {
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "step": str(step),
+            "fields": fields,
+        }
+        try:
+            with self._debug_state_path.open("w", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=False, indent=2))
+                handle.flush()
+                os.fsync(handle.fileno())
+        except Exception:
+            logging.exception("Failed to persist debug critical step: %s", step)
+        self._debug_trace("critical_step_set", step=step, **fields)
+
+    def _debug_clear_critical_step(self, note: str | None = None) -> None:
+        if self._debug_state_path is not None and self._debug_state_path.exists():
+            try:
+                self._debug_state_path.unlink(missing_ok=True)
+            except Exception:
+                logging.exception("Failed to clear debug critical step file.")
+        self._debug_trace("critical_step_cleared", note=note or "")
+
+    def _recover_debug_state(self) -> None:
+        if self._debug_state_path is None or not self._debug_state_path.exists():
+            return
+        try:
+            payload = json.loads(self._debug_state_path.read_text(encoding="utf-8"))
+            step = payload.get("step", "unknown")
+            ts = payload.get("ts", "unknown")
+            fields = payload.get("fields", {})
+            logging.warning(
+                "Previous session may have terminated during critical step '%s' at %s: %s",
+                step,
+                ts,
+                fields,
+            )
+            self._debug_trace("previous_session_terminated_during_critical_step", step=step, ts=ts, fields=fields)
+        except Exception:
+            logging.exception("Failed to recover previous debug critical step.")
+
+    def _install_qt_message_handler(self) -> None:
+        if self._qt_message_handler_installed:
+            return
+
+        def _qt_message_handler(mode, context, message) -> None:  # noqa: ANN001
+            category = getattr(context, "category", "") if context is not None else ""
+            file_name = getattr(context, "file", "") if context is not None else ""
+            line_no = getattr(context, "line", 0) if context is not None else 0
+            text = f"Qt message [{category}] {message} ({file_name}:{line_no})"
+            mode_name = str(mode)
+            try:
+                if "QtFatalMsg" in mode_name:
+                    logging.critical(text)
+                    self._debug_trace("qt_fatal", message=message, category=category, file=file_name, line=line_no)
+                elif "QtCriticalMsg" in mode_name:
+                    logging.error(text)
+                elif "QtWarningMsg" in mode_name:
+                    logging.warning(text)
+                elif self._debug_logging_enabled():
+                    logging.debug(text)
+            except Exception:
+                pass
+
+        qInstallMessageHandler(_qt_message_handler)
+        self._qt_message_handler_installed = True
+        logging.info("Qt message handler installed.")
 
     def _install_fault_handler(self) -> None:
         if not bool(self.config["general"].get("log_to_file", True)):
@@ -515,11 +659,12 @@ class WhisperTypeApp:
             log_dir = resolve_user_path(raw_log_dir)
             log_dir.mkdir(parents=True, exist_ok=True)
             fault_log = log_dir / "whisply-fault.log"
-            self._fault_log_handle = open(fault_log, "a", encoding="utf-8")
+            self._fault_log_handle = open(fault_log, "a", encoding="utf-8", buffering=1)
             self._fault_log_handle.write(
                 f"\n=== Fault handler active: {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n"
             )
             self._fault_log_handle.flush()
+            os.fsync(self._fault_log_handle.fileno())
             faulthandler.enable(file=self._fault_log_handle, all_threads=True)
             logging.info("Fault handler enabled: %s", fault_log)
         except Exception:
@@ -684,13 +829,17 @@ class WhisperTypeApp:
     def _open_settings(self) -> None:
         try:
             logging.info("Open settings requested.")
+            self._debug_set_critical_step("settings_open_requested")
             if self._settings_dialog and self._settings_dialog.isVisible():
                 logging.info("Settings dialog already visible; raising existing window.")
+                self._debug_trace("settings_dialog_raise_existing")
+                self._debug_clear_critical_step("settings_dialog_already_visible")
                 self._settings_dialog.raise_()
                 self._settings_dialog.activateWindow()
                 return
 
             logging.info("Creating SettingsDialog instance.")
+            self._debug_set_critical_step("settings_dialog_creating")
             self._settings_dialog = SettingsDialog(
                 config=self.config,
                 on_save=self._apply_settings,
@@ -701,12 +850,19 @@ class WhisperTypeApp:
                 on_open_config=self._open_config,
             )
             self._settings_dialog.destroyed.connect(lambda *_: logging.info("Settings dialog destroyed."))
+            self._settings_dialog.destroyed.connect(
+                lambda *_: self._debug_trace("settings_dialog_destroyed")
+            )
             logging.info("SettingsDialog instance created.")
             logging.info("Showing SettingsDialog.")
+            self._debug_set_critical_step("settings_dialog_show")
             self._settings_dialog.show()
             logging.info("Settings dialog opened.")
+            self._debug_trace("settings_dialog_opened")
+            QTimer.singleShot(0, lambda: self._debug_clear_critical_step("settings_dialog_opened"))
         except Exception:
             logging.exception("Failed to open settings dialog.")
+            self._debug_trace("settings_dialog_open_failed")
             self._show_tray_message(self._t("tray_error_prefix") + ": settings")
 
     def _show_tray_message(self, body: str) -> None:
@@ -931,11 +1087,23 @@ class WhisperTypeApp:
 
     def _on_cuda_fallback(self, reason: str) -> None:
         logging.warning("CUDA fallback triggered: %s", reason)
-        self._show_tray_message(self._t("cuda_fallback_notice"))
+        reason_lower = str(reason).lower()
+        is_oom = "out of memory" in reason_lower or "alloc" in reason_lower and "cuda" in reason_lower
+        if is_oom:
+            self._show_tray_message(self._t("cuda_fallback_oom_notice"))
+            self.overlay.show_warning(self._t("cuda_fallback_oom_notice"), ms=1800)
+        else:
+            self._show_tray_message(self._t("cuda_fallback_notice"))
         configured_backend = str(self.config["whisper"].get("backend", "auto"))
         if configured_backend not in {"cuda", "auto"}:
             if configured_backend != "cpu":
                 self._set_backend_config_only("cpu")
+            return
+
+        if is_oom:
+            self._pending_cuda_reenable = True
+            if not self._transcription_in_progress:
+                self._apply_pending_cuda_reenable()
             return
 
         if self._offer_cuda_runtime_download(
@@ -958,7 +1126,7 @@ class WhisperTypeApp:
             return
 
         self._set_backend_config_only("cpu")
-        self.overlay.show_error(self._t("cuda_runtime_missing"), ms=1200)
+        self.overlay.show_warning(self._t("cuda_runtime_missing"), ms=1400)
 
     def _apply_pending_cuda_reenable(self) -> None:
         if not self._pending_cuda_reenable:
@@ -1102,7 +1270,7 @@ class WhisperTypeApp:
 
         if debug_logging != bool(self.config["general"].get("debug_logging", False)):
             self.config["general"]["debug_logging"] = debug_logging
-            self._apply_logging_level()
+            self._reconfigure_runtime_logging()
             logging.info("Debug logging changed to %s.", debug_logging)
 
         self.config_manager.save(self.config)
@@ -1148,6 +1316,9 @@ class WhisperTypeApp:
             rescue_copy_available_provider=self._rescue_copy_available,
             on_copy_last_dictation=self._copy_last_dictation_to_clipboard,
             on_quit=self.shutdown,
+            on_debug_trace=lambda event: self._debug_trace(event),
+            on_debug_critical=lambda step: self._debug_set_critical_step(step),
+            on_debug_clear=lambda note=None: self._debug_clear_critical_step(note),
         )
         self.tray.set_selected(
             model=self.config["whisper"]["model"],
@@ -1409,7 +1580,7 @@ class WhisperTypeApp:
     def _on_model_install_request(self, model: str) -> None:
         model = str(model)
         if self.recorder.is_running or self._transcription_in_progress:
-            self.overlay.show_error(self._t("model_install_busy"), ms=1000)
+            self.overlay.show_notice(self._t("model_install_busy"), ms=1100)
             return
         if self._model_install_in_progress:
             self._show_tray_message(self._t("model_install_in_progress"))
@@ -1641,7 +1812,7 @@ class WhisperTypeApp:
         self._model_loading_mode = "download"
         self._transcription_in_progress = False
         self.bridge.transcription_settled.emit()
-        self.overlay.show_error(self._t("overlay_transcription_timeout"), ms=1500)
+        self.overlay.show_warning(self._t("overlay_transcription_timeout"), ms=1500)
 
     def _open_logs(self) -> None:
         raw_log_dir = self.config["general"].get("log_dir") or str(get_log_dir())
@@ -1667,7 +1838,7 @@ class WhisperTypeApp:
         self.recorder.start()
         if not self.recorder.is_running:
             logging.info("Recorder start failed / no microphone.")
-            self.overlay.show_error(self._t("overlay_no_microphone"), ms=1100)
+            self.overlay.show_warning(self._t("overlay_no_microphone"), ms=1200)
             return
         self.overlay.show_recording()
 
@@ -1687,7 +1858,7 @@ class WhisperTypeApp:
 
         audio = self.recorder.stop()
         if audio.size == 0:
-            self.overlay.show_error(self._t("overlay_no_audio"))
+            self.overlay.show_warning(self._t("overlay_no_audio"), ms=1200)
             return
 
         if self.config["audio"].get("vad_enabled", True):
@@ -1705,11 +1876,11 @@ class WhisperTypeApp:
                 vad_result.duration_ms,
             )
             if not vad_result.speech:
-                self.overlay.show_error(self._t("overlay_no_speech"), ms=900)
+                self.overlay.show_notice(self._t("overlay_no_speech"), ms=950)
                 return
 
         if not self._transcribe_lock.acquire(blocking=False):
-            self.overlay.show_error(self._t("overlay_busy"))
+            self.overlay.show_notice(self._t("overlay_busy"), ms=1000)
             return
 
         self._transcription_in_progress = True
@@ -1809,14 +1980,21 @@ class WhisperTypeApp:
             self._show_tray_message(self._t("rescue_copy_unavailable"))
         self.tray.refresh_status()
 
+    def _insert_transcription_payload(self, payload: str) -> None:
+        try:
+            self.inserter.insert(payload)
+        except Exception:
+            logging.exception("Failed to insert transcription payload.")
+            self.overlay.show_error(self._t("tray_error_prefix"), ms=1400)
+
     def _apply_transcription(self, text: str) -> None:
         payload = text.strip()
         if not payload:
-            self.overlay.show_error(self._t("overlay_empty_transcription"), ms=1200)
+            self.overlay.show_notice(self._t("overlay_empty_transcription"), ms=1200)
             return
-        self.inserter.insert(payload)
         self._store_rescue_text(payload)
         self.overlay.show_done(self.config["overlay"]["display_duration_ms"])
+        QTimer.singleShot(20, lambda payload=payload: self._insert_transcription_payload(payload))
 
     def shutdown(self) -> None:
         if self._shutting_down:
@@ -1859,6 +2037,11 @@ class WhisperTypeApp:
                 self._fault_log_handle = None
         except Exception:
             logging.debug("Failed to close fault log handle.")
+        try:
+            self._debug_clear_critical_step("shutdown")
+            self._close_debug_trace()
+        except Exception:
+            logging.debug("Failed to close debug trace cleanly.")
 
         self.qt_app.quit()
 

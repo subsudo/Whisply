@@ -55,11 +55,10 @@ QWidget#trayRow[clickable="true"]:hover {
 QWidget#trayRow[role="quit"]:hover {
     background: rgba(239, 68, 68, .06);
 }
-QWidget#trayRow:disabled {
+QWidget#trayRow:disabled,
+QWidget#trayRow:disabled:hover,
+QWidget#trayRow[role="quit"]:disabled:hover {
     background: transparent;
-}
-QWidget#trayRow:disabled QLabel#trayLabelAction {
-    color: #4a5568;
 }
 
 QLabel#trayLabelStatus {
@@ -80,6 +79,14 @@ QLabel#trayLabelMain {
 QLabel#trayValue {
     color: #4a5568;
     font-size: 12px;
+}
+QLabel#trayIndicator {
+    color: #aeb8c6;
+    font-size: 12px;
+    font-weight: 700;
+}
+QWidget#trayRow:disabled QLabel#trayIndicator {
+    color: #566171;
 }
 QLabel#trayPill {
     color: #aeb8c6;
@@ -109,6 +116,9 @@ QLabel#trayLabelAction {
 }
 QWidget#trayRow[clickable="true"]:hover QLabel#trayLabelAction {
     color: #c8d0dc;
+}
+QWidget#trayRow:disabled QLabel#trayLabelAction {
+    color: #4a5568;
 }
 QLabel#trayLabelQuit {
     color: #6b3a3a;
@@ -289,8 +299,19 @@ class _TrayRowWidget(QWidget):
     def set_value_pill(self, text: str) -> None:
         self._value_mode = "pill"
         self.value.setObjectName("trayPill")
+        self.value.setAlignment(Qt.AlignCenter)
         self._repolish_value()
         self.set_value(text)
+
+    def set_value_indicator(self, text: str) -> None:
+        self._value_mode = "indicator"
+        self.value.setObjectName("trayIndicator")
+        self.value.setAlignment(Qt.AlignCenter)
+        self._repolish_value()
+        self._raw_value = str(text or "")
+        self._update_value_width()
+        self._apply_elided_texts()
+        self.value.setVisible(bool(self._raw_value))
 
     def clear_value(self) -> None:
         self._raw_value = ""
@@ -310,6 +331,8 @@ class _TrayRowWidget(QWidget):
             fm = QFontMetrics(self.value.font())
             width = max(64, fm.horizontalAdvance(self._raw_value) + 18)
             self.value.setFixedWidth(width)
+        elif self._value_mode == "indicator":
+            self.value.setFixedWidth(18)
         else:
             self.value.setFixedWidth(96)
 
@@ -349,10 +372,20 @@ class _TrayRowWidget(QWidget):
 
     def set_enabled(self, enabled: bool) -> None:
         self.setEnabled(enabled)
-        if enabled and self._on_click is not None:
+        self.label.setEnabled(enabled)
+        self.value.setEnabled(enabled)
+        self.arrow.setEnabled(enabled)
+        clickable = enabled and self._on_click is not None
+        self.setProperty("clickable", "true" if clickable else "false")
+        if clickable:
             self.setCursor(Qt.PointingHandCursor)
         else:
             self.setCursor(Qt.ArrowCursor)
+        for widget in (self, self.label, self.value, self.arrow):
+            style = widget.style()
+            style.unpolish(widget)
+            style.polish(widget)
+            widget.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if (
@@ -389,6 +422,9 @@ class AppTray(QSystemTrayIcon):
         rescue_copy_available_provider: Callable[[], bool],
         on_copy_last_dictation: Callable[[], None],
         on_quit: Callable[[], None],
+        on_debug_trace: Callable[[str], None] | None = None,
+        on_debug_critical: Callable[[str], None] | None = None,
+        on_debug_clear: Callable[[str | None], None] | None = None,
     ) -> None:
         super().__init__(_resolve_tray_icon(icon_path))
         self._short_status_provider = short_status_provider
@@ -409,6 +445,9 @@ class AppTray(QSystemTrayIcon):
         self._rescue_copy_available_provider = rescue_copy_available_provider
         self._on_copy_last_dictation = on_copy_last_dictation
         self._on_quit = on_quit
+        self._on_debug_trace = on_debug_trace
+        self._on_debug_critical = on_debug_critical
+        self._on_debug_clear = on_debug_clear
         self._ui_language = normalize_ui_language(self._ui_language_provider())
 
         self._current_model = ""
@@ -427,6 +466,8 @@ class AppTray(QSystemTrayIcon):
         self.menu.setStyleSheet(_MENU_QSS)
         self.menu.setMinimumWidth(250)
         self.menu.setMaximumWidth(250)
+        self.menu.aboutToShow.connect(self._on_menu_about_to_show)
+        self.menu.aboutToHide.connect(self._on_menu_about_to_hide)
 
         # Hidden submenus (opened on row click)
         self._model_menu = QMenu(self.menu)
@@ -446,6 +487,37 @@ class AppTray(QSystemTrayIcon):
         self.activated.connect(self._handle_activated)
         self._retranslate()
 
+    def _debug_trace(self, event: str) -> None:
+        try:
+            if self._on_debug_trace is not None:
+                self._on_debug_trace(event)
+        except Exception:
+            log.exception("Tray debug trace callback failed: %s", event)
+
+    def _debug_critical(self, step: str) -> None:
+        try:
+            if self._on_debug_critical is not None:
+                self._on_debug_critical(step)
+        except Exception:
+            log.exception("Tray debug critical callback failed: %s", step)
+
+    def _debug_clear(self, note: str | None = None) -> None:
+        try:
+            if self._on_debug_clear is not None:
+                self._on_debug_clear(note)
+        except Exception:
+            log.exception("Tray debug clear callback failed.")
+
+    def _on_menu_about_to_show(self) -> None:
+        log.debug("Tray menu aboutToShow.")
+        self._debug_critical("tray_menu_about_to_show")
+        self._debug_trace("tray_menu_about_to_show")
+
+    def _on_menu_about_to_hide(self) -> None:
+        log.debug("Tray menu aboutToHide.")
+        self._debug_trace("tray_menu_about_to_hide")
+        self._debug_clear("tray_menu_hidden")
+
     def _build_submenus(self) -> None:
         model_group = QActionGroup(self)
         model_group.setExclusive(True)
@@ -456,6 +528,7 @@ class AppTray(QSystemTrayIcon):
                 lambda checked=False, m=model: self._queue_callback(
                     f"model:{m}",
                     lambda m=m: self._on_model_action(m),
+                    close_menu=False,
                 )
             )
             model_group.addAction(action)
@@ -471,6 +544,7 @@ class AppTray(QSystemTrayIcon):
                 lambda checked=False, l=lang: self._queue_callback(
                     f"transcription_language:{l}",
                     lambda l=l: self._on_transcription_language(l),
+                    close_menu=False,
                 )
             )
             tr_lang_group.addAction(action)
@@ -486,6 +560,7 @@ class AppTray(QSystemTrayIcon):
                 lambda checked=False, b=backend: self._queue_callback(
                     f"backend:{b}",
                     lambda b=b: self._on_backend(b),
+                    close_menu=False,
                 )
             )
             backend_group.addAction(action)
@@ -550,7 +625,7 @@ class AppTray(QSystemTrayIcon):
             role="action",
             label=self._t("tray_menu_settings"),
             clickable=True,
-            on_click=lambda: self._invoke_callback("open_settings", self._on_open_settings),
+            on_click=lambda: self._invoke_callback("open_settings", self._on_open_settings, close_menu=True),
         )
         self._add_row(self._settings_row)
 
@@ -558,32 +633,32 @@ class AppTray(QSystemTrayIcon):
             role="action",
             label=self._t("tray_menu_unload_model"),
             clickable=True,
-            on_click=lambda: self._invoke_callback("unload_model", self._on_unload_model),
+            on_click=lambda: self._invoke_callback("unload_model", self._on_unload_model, close_menu=False),
         )
-        self._add_row(self._unload_row)
+        self._unload_row_action = self._add_row(self._unload_row)
 
         self._unload_never_row = _TrayRowWidget(
             role="action",
             label=self._t("tray_menu_unload_never"),
             clickable=True,
-            on_click=lambda: self._invoke_callback("toggle_unload_never", self._on_toggle_unload_never),
+            on_click=lambda: self._invoke_callback("toggle_unload_never", self._on_toggle_unload_never, close_menu=False),
         )
-        self._add_row(self._unload_never_row)
+        self._unload_never_row_action = self._add_row(self._unload_never_row)
 
         self._rescue_copy_row = _TrayRowWidget(
             role="action",
             label=self._t("tray_menu_last_dictation"),
             clickable=True,
-            on_click=lambda: self._invoke_callback("copy_last_dictation", self._on_copy_last_dictation),
+            on_click=lambda: self._invoke_callback("copy_last_dictation", self._on_copy_last_dictation, close_menu=True),
         )
         self._rescue_copy_row.set_value_pill(self._t("tray_action_copy"))
-        self._add_row(self._rescue_copy_row)
+        self._rescue_copy_row_action = self._add_row(self._rescue_copy_row)
 
         self._quit_row = _TrayRowWidget(
             role="quit",
             label=self._t("tray_menu_quit"),
             clickable=True,
-            on_click=lambda: self._invoke_callback("quit", self._on_quit),
+            on_click=lambda: self._invoke_callback("quit", self._on_quit, close_menu=True),
         )
         self._add_row(self._quit_row)
 
@@ -661,6 +736,7 @@ class AppTray(QSystemTrayIcon):
                 lambda checked=False, t=token: self._queue_callback(
                     f"audio_device:{t}",
                     lambda t=t: self._on_audio_device(t),
+                    close_menu=False,
                 )
             )
             self._audio_group.addAction(action)
@@ -708,6 +784,7 @@ class AppTray(QSystemTrayIcon):
             available = bool(self._unload_available_provider())
         except Exception:
             log.exception("Could not read unload availability")
+        self._unload_row_action.setEnabled(available)
         self._unload_row.set_enabled(available)
 
     def _update_unload_never_row(self) -> None:
@@ -718,6 +795,8 @@ class AppTray(QSystemTrayIcon):
             log.exception("Could not read unload-never state")
         suffix = " \u2713" if enabled else ""
         self._unload_never_row.set_label(self._t("tray_menu_unload_never") + suffix)
+        self._unload_never_row.clear_value()
+        self._unload_never_row_action.setEnabled(True)
         self._unload_never_row.set_enabled(True)
 
     def _update_rescue_copy_row(self) -> None:
@@ -726,6 +805,7 @@ class AppTray(QSystemTrayIcon):
             available = bool(self._rescue_copy_available_provider())
         except Exception:
             log.exception("Could not read rescue-copy availability")
+        self._rescue_copy_row_action.setEnabled(available)
         self._rescue_copy_row.set_enabled(available)
         self._rescue_copy_row.set_value_pill(self._t("tray_action_copy"))
 
@@ -751,25 +831,57 @@ class AppTray(QSystemTrayIcon):
     def _t(self, key: str, **kwargs: object) -> str:
         return tr(self._ui_language, key, **kwargs)
 
-    def _invoke_callback(self, label: str, callback: Callable[[], None]) -> None:
-        self._queue_callback(label, callback)
+    def _invoke_callback(self, label: str, callback: Callable[[], None], close_menu: bool = True) -> None:
+        self._queue_callback(label, callback, close_menu=close_menu)
 
-    def _queue_callback(self, label: str, callback: Callable[[], None]) -> None:
+    def _queue_callback(self, label: str, callback: Callable[[], None], close_menu: bool = True) -> None:
         try:
-            log.debug("Queueing tray callback: %s", label)
-            self.menu.close()
-            self._model_menu.close()
-            self._transcription_language_menu.close()
-            self._backend_menu.close()
-            self._audio_menu.close()
-            QTimer.singleShot(0, lambda: self._run_callback(label, callback))
+            log.debug("Queueing tray callback: %s (close_menu=%s)", label, close_menu)
+            submenu_open = any(
+                menu.isVisible()
+                for menu in (
+                    self._model_menu,
+                    self._transcription_language_menu,
+                    self._backend_menu,
+                    self._audio_menu,
+                )
+            )
+            if close_menu:
+                reopen_pos = QPoint(self.menu.pos()) if self.menu.isVisible() else QPoint(QCursor.pos())
+                self.menu.close()
+                self._model_menu.close()
+                self._transcription_language_menu.close()
+                self._backend_menu.close()
+                self._audio_menu.close()
+                QTimer.singleShot(0, lambda: self._run_callback(label, callback, close_menu, reopen_pos))
+                return
+
+            if submenu_open:
+                reopen_pos = QPoint(self.menu.pos()) if self.menu.isVisible() else QPoint(QCursor.pos())
+                self._model_menu.close()
+                self._transcription_language_menu.close()
+                self._backend_menu.close()
+                self._audio_menu.close()
+                QTimer.singleShot(0, lambda: self._run_callback(label, callback, False, reopen_pos))
+                return
+
+            QTimer.singleShot(0, lambda: self._run_callback(label, callback, False, QPoint()))
         except Exception:
             log.exception("Tray callback queueing failed: %s", label)
 
-    def _run_callback(self, label: str, callback: Callable[[], None]) -> None:
+    def _run_callback(self, label: str, callback: Callable[[], None], close_menu: bool, reopen_pos: QPoint) -> None:
         try:
             log.debug("Running tray callback: %s", label)
             callback()
             log.debug("Tray callback completed: %s", label)
+            if not close_menu and not reopen_pos.isNull():
+                QTimer.singleShot(0, lambda pos=QPoint(reopen_pos): self._reopen_main_menu(pos))
         except Exception:
             log.exception("Tray callback failed: %s", label)
+
+    def _reopen_main_menu(self, pos: QPoint) -> None:
+        try:
+            self.refresh_status()
+            self.menu.popup(pos)
+        except Exception:
+            log.exception("Tray menu reopen failed.")

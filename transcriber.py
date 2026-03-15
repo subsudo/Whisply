@@ -45,6 +45,7 @@ class Transcriber:
         self._on_model_load_start = on_model_load_start
         self._on_model_load_progress = on_model_load_progress
         self._on_model_load_done = on_model_load_done
+        self._warmup_duration_estimates: dict[tuple[str, str], float] = {}
 
     def transcribe_async(self, audio: np.ndarray) -> Future[str]:
         return self._executor.submit(self._transcribe_with_lazy_load, audio)
@@ -82,12 +83,14 @@ class Transcriber:
             if not self._model_loaded:
                 log.info("Loading model '%s' ...", self.model_size)
                 load_mode = self._infer_model_load_mode(self.model_size)
+                load_started_at = time.monotonic()
                 if self._on_model_load_start:
                     try:
                         self._on_model_load_start(self.model_size, load_mode)
                     except Exception:
                         log.exception("on_model_load_start callback failed")
                 progress_stop = threading.Event()
+                load_complete = threading.Event()
                 progress_thread: threading.Thread | None = None
                 try:
                     if self._on_model_load_progress:
@@ -101,7 +104,11 @@ class Transcriber:
                                 progress_stop,
                             )
                         else:
-                            progress_thread = self._start_model_warmup_progress_monitor(progress_stop)
+                            progress_thread = self._start_model_warmup_progress_monitor(
+                                progress_stop,
+                                load_complete,
+                                self._estimated_warmup_duration_sec(self.model_size),
+                            )
                     self.backend.load_model(self.model_size)
                 except Exception as exc:
                     if self._is_cuda_backend():
@@ -109,9 +116,18 @@ class Transcriber:
                     else:
                         raise
                 finally:
-                    progress_stop.set()
+                    observed_load_sec = max(0.05, time.monotonic() - load_started_at)
+                    if load_mode == "warmup":
+                        load_complete.set()
+                    else:
+                        progress_stop.set()
                     if progress_thread is not None:
-                        progress_thread.join(timeout=0.6)
+                        progress_thread.join(timeout=1.2 if load_mode == "warmup" else 0.6)
+                        if progress_thread.is_alive():
+                            progress_stop.set()
+                            progress_thread.join(timeout=0.3)
+                    if load_mode == "warmup":
+                        self._record_warmup_duration(self.model_size, observed_load_sec)
                     if self._on_model_load_progress:
                         try:
                             self._on_model_load_progress(100)
@@ -195,16 +211,57 @@ class Transcriber:
     def _start_model_warmup_progress_monitor(
         self,
         stop_event: threading.Event,
+        load_complete_event: threading.Event,
+        estimated_duration_sec: float,
     ) -> threading.Thread:
         def _worker() -> None:
-            progress = 0
-            while not stop_event.wait(0.09):
-                if progress < 92:
-                    progress = min(92, progress + 2)
+            start = time.monotonic()
+            duration = max(0.35, float(estimated_duration_sec))
+            last_progress = -1
+            tick_sec = 0.04
+
+            while not stop_event.wait(tick_sec):
+                elapsed = max(0.0, time.monotonic() - start)
+                progress = min(94, int((elapsed / duration) * 94.0))
+                if progress == last_progress:
+                    if load_complete_event.is_set():
+                        break
+                    continue
                 try:
                     cast(Callable[[int], None], self._on_model_load_progress)(progress)
                 except Exception:
                     log.exception("on_model_load_progress callback failed")
+                    return
+                last_progress = progress
+                if load_complete_event.is_set():
+                    break
+
+            if stop_event.is_set():
+                return
+
+            start_progress = max(0, min(last_progress, 99))
+            remaining = max(0, 100 - start_progress)
+            if remaining <= 0:
+                return
+
+            finish_sec = min(0.9, max(0.18, (remaining / 94.0) * duration))
+            finish_started_at = time.monotonic()
+
+            while not stop_event.wait(0.03):
+                finish_elapsed = max(0.0, time.monotonic() - finish_started_at)
+                ratio = min(1.0, finish_elapsed / finish_sec)
+                progress = min(100, int(round(start_progress + (remaining * ratio))))
+                if progress == last_progress:
+                    if ratio >= 1.0:
+                        return
+                    continue
+                try:
+                    cast(Callable[[int], None], self._on_model_load_progress)(progress)
+                except Exception:
+                    log.exception("on_model_load_progress callback failed")
+                    return
+                last_progress = progress
+                if ratio >= 1.0:
                     return
 
         thread = threading.Thread(
@@ -214,6 +271,49 @@ class Transcriber:
         )
         thread.start()
         return thread
+
+    def _warmup_profile_key(self, model_size: str) -> tuple[str, str]:
+        try:
+            device_info = self.backend.get_device_info().lower()
+        except Exception:
+            device_info = str(self.backend_name).lower()
+        profile = "cuda" if device_info.startswith("cuda") else "cpu"
+        return profile, str(model_size).strip().lower()
+
+    def _estimated_warmup_duration_sec(self, model_size: str) -> float:
+        key = self._warmup_profile_key(model_size)
+        cached = self._warmup_duration_estimates.get(key)
+        if cached is not None and cached > 0:
+            return float(cached)
+
+        defaults = {
+            ("cpu", "small"): 0.9,
+            ("cpu", "medium"): 1.4,
+            ("cpu", "large-v3"): 2.2,
+            ("cpu", "large-v3-turbo"): 1.8,
+            ("cuda", "small"): 0.55,
+            ("cuda", "medium"): 0.85,
+            ("cuda", "large-v3"): 1.2,
+            ("cuda", "large-v3-turbo"): 1.0,
+        }
+        return float(defaults.get(key, 1.8))
+
+    def _record_warmup_duration(self, model_size: str, observed_sec: float) -> None:
+        key = self._warmup_profile_key(model_size)
+        clamped = min(8.0, max(0.35, float(observed_sec)))
+        previous = self._warmup_duration_estimates.get(key)
+        if previous is None:
+            updated = clamped
+        else:
+            updated = (previous * 0.4) + (clamped * 0.6)
+        self._warmup_duration_estimates[key] = updated
+        log.debug(
+            "Warmup duration estimate updated for %s/%s: observed=%.3fs estimate=%.3fs",
+            key[0],
+            key[1],
+            clamped,
+            updated,
+        )
 
     def _infer_model_load_mode(self, model_size: str) -> str:
         if not self.download_root:
@@ -253,11 +353,17 @@ class Transcriber:
         if model_size == self.model_size:
             return
         with self._lock:
+            previous_model = self.model_size
             self.model_size = model_size
             if self._model_loaded:
                 self.backend.unload_model()
-                self.backend.load_model(model_size)
-                self._last_used_monotonic = time.monotonic()
+                self._model_loaded = False
+                log.info(
+                    "Model switched from %s to %s. Current model unloaded; next transcription will lazy-load the new model.",
+                    previous_model,
+                    model_size,
+                )
+            self._last_used_monotonic = time.monotonic()
 
     def set_language(self, language: str) -> None:
         self.language = language
