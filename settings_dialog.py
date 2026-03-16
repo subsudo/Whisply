@@ -4,9 +4,10 @@ from collections.abc import Callable
 from html import escape
 from pathlib import Path
 import logging
+import threading
 import sys
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QIcon
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -199,6 +200,10 @@ _QSS_CUDA_BADGE = (
 _FORM_LABEL_WIDTH = 148
 
 
+class _SettingsDialogSignals(QObject):
+    cuda_status_ready = Signal(int, object)
+
+
 class SettingsDialog(QDialog):
     def __init__(
         self,
@@ -217,6 +222,10 @@ class SettingsDialog(QDialog):
         self._model_status_provider = model_status_provider
         self._on_open_logs = on_open_logs
         self._on_open_config = on_open_config
+        self._signals = _SettingsDialogSignals()
+        self._signals.cuda_status_ready.connect(self._apply_cuda_status_result)
+        self._cuda_refresh_generation = 0
+        self._cuda_refresh_in_flight = False
         self._ui_language = normalize_ui_language(config.get("general", {}).get("language_ui", "de"))
         self.setWindowTitle(self._t("settings_title"))
         self._set_window_icon()
@@ -711,6 +720,7 @@ class SettingsDialog(QDialog):
     def showEvent(self, event) -> None:  # noqa: N802, ANN001
         super().showEvent(event)
         log.info("SettingsDialog showEvent: visible=%s size=%sx%s", self.isVisible(), self.width(), self.height())
+        self._refresh_cuda_status()
 
     def closeEvent(self, event) -> None:  # noqa: N802, ANN001
         log.info("SettingsDialog closeEvent")
@@ -736,25 +746,49 @@ class SettingsDialog(QDialog):
 
     def _refresh_cuda_status(self) -> None:
         if not self._cuda_status_provider:
-            self.cuda_status_value.setText(self._t("settings_cuda_state_unknown"))
-            self.cuda_download_button.hide()
+            self._set_cuda_status_widgets(self._t("settings_cuda_state_unknown"), False)
             return
-
-        try:
-            state = self._cuda_status_provider()
-        except Exception:
-            self.cuda_status_value.setText(self._t("settings_cuda_state_unknown"))
-            self.cuda_download_button.hide()
+        if self._cuda_refresh_in_flight:
             return
+        self._cuda_refresh_in_flight = True
+        self._cuda_refresh_generation += 1
+        generation = self._cuda_refresh_generation
+        self._set_cuda_status_widgets(self._t("settings_cuda_state_unknown"), False)
 
-        text         = str(state.get("text", self._t("settings_cuda_state_unknown")))
-        downloadable = bool(state.get("downloadable", False))
-        self.cuda_status_value.setText(text)
-        if downloadable and self._on_cuda_download:
-            self.cuda_download_button.show()
-            self.cuda_download_button.setEnabled(True)
-        else:
-            self.cuda_download_button.hide()
+        def _worker() -> None:
+            try:
+                state = self._cuda_status_provider()
+            except Exception:
+                state = {
+                    "text": self._t("settings_cuda_state_unknown"),
+                    "downloadable": False,
+                }
+            self._signals.cuda_status_ready.emit(generation, state)
+
+        threading.Thread(
+            target=_worker,
+            name="settings-cuda-status",
+            daemon=True,
+        ).start()
+
+    def _apply_cuda_status_result(self, generation: int, state: object) -> None:
+        if generation != self._cuda_refresh_generation:
+            return
+        self._cuda_refresh_in_flight = False
+        payload = state if isinstance(state, dict) else {}
+        text = str(payload.get("text", self._t("settings_cuda_state_unknown")))
+        downloadable = bool(payload.get("downloadable", False))
+        self._set_cuda_status_widgets(text, downloadable)
+
+    def _set_cuda_status_widgets(self, text: str, downloadable: bool) -> None:
+        if hasattr(self, "cuda_status_value"):
+            self.cuda_status_value.setText(text)
+        if hasattr(self, "cuda_download_button"):
+            if downloadable and self._on_cuda_download:
+                self.cuda_download_button.show()
+                self.cuda_download_button.setEnabled(True)
+            else:
+                self.cuda_download_button.hide()
 
     def _handle_cuda_download(self) -> None:
         if not self._on_cuda_download:

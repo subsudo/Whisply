@@ -282,12 +282,17 @@ class WhisperTypeApp:
         self._rescue_expire_timer.setSingleShot(True)
         self._rescue_expire_timer.timeout.connect(self._on_rescue_expired)
         self._audio_device_fingerprint: frozenset | None = None
+        self._tray_audio_devices_cache: list[dict[str, str | bool]] = []
+        self._tray_audio_current_token = "default"
+        self._tray_model_status_cache: dict[str, bool] = {}
         self._tray_retry_timer = QTimer()
         self._tray_retry_timer.setInterval(1500)
         self._tray_retry_timer.timeout.connect(self._ensure_tray_visible)
         self._tray_retry_attempts = 0
         self._tray_retry_max_attempts = 40
         self._wire_events()
+        self._refresh_tray_audio_devices_cache()
+        self._refresh_tray_model_status_cache()
 
         log.info("Setting up tray icon")
         self._setup_tray()
@@ -1285,6 +1290,8 @@ class WhisperTypeApp:
 
     def _apply_settings_ui_refresh(self) -> None:
         logging.info("Deferred settings UI refresh started.")
+        self._refresh_tray_audio_devices_cache()
+        self._refresh_tray_model_status_cache()
         self.tray.set_selected(
             model=self.config["whisper"]["model"],
             transcription_language=self.config["whisper"]["language"],
@@ -1326,6 +1333,8 @@ class WhisperTypeApp:
             on_debug_critical=lambda step: self._debug_set_critical_step(step),
             on_debug_clear=lambda note=None: self._debug_clear_critical_step(note),
         )
+        self.tray.update_audio_devices_snapshot(self._tray_audio_devices_cache, self._tray_audio_current_token)
+        self.tray.update_model_status_snapshot(self._tray_model_status_cache)
         self.tray.set_selected(
             model=self.config["whisper"]["model"],
             transcription_language=self.config["whisper"]["language"],
@@ -1459,6 +1468,7 @@ class WhisperTypeApp:
             cuda_ok, _ = check_cuda_runtime_available()
             nvidia_present = has_nvidia_gpu()
             model_status = refresh_model_status(self.config["whisper"]["download_root"])
+            self._tray_model_status_cache = dict(model_status)
             recommended_models = self._recommended_first_run_models(suggested_backend, cuda_vram_gb)
             suggested_models = [m for m in recommended_models if not model_status.get(m, False)]
             installed_models = [m for m, installed in model_status.items() if installed]
@@ -1493,11 +1503,13 @@ class WhisperTypeApp:
                     self.config["whisper"]["model"] = preferred_model
                     self.config_manager.save(self.config)
                     self.transcriber.set_model(preferred_model)
+                    self._refresh_tray_model_status_cache()
 
             failed_models = [str(x) for x in payload.get("failed_models", [])]
             if failed_models:
                 failed_text = ", ".join(failed_models)
                 self._show_tray_message(self._t("first_run_model_prefetch_failed", models=failed_text))
+            self._refresh_tray_model_status_cache()
 
             if bool(payload.get("restart_recommended", False)):
                 QMessageBox.information(
@@ -1558,7 +1570,7 @@ class WhisperTypeApp:
             logging.exception("Failed to reposition overlay after screen removal.")
 
     def _status_text_full(self) -> str:
-        device_token = self.recorder.get_current_device_token()
+        device_token = self._tray_audio_current_token or self.recorder.get_current_device_token()
         mic_state = (
             self._t("status_mic_default_full")
             if device_token == "default"
@@ -1573,15 +1585,35 @@ class WhisperTypeApp:
         )
 
     def _audio_devices_for_tray(self) -> tuple[list[dict[str, str | bool]], str]:
-        current = self.recorder.get_current_device_token()
-        devices: list[dict[str, str | bool]] = [
-            {"token": "default", "label": self._t("status_mic_default_full"), "is_default": True}
-        ]
-        devices.extend(AudioRecorder.list_input_devices())
-        return devices, current
+        return list(self._tray_audio_devices_cache), self._tray_audio_current_token
 
     def _model_status_for_tray(self) -> dict[str, bool]:
-        return get_model_status(self.config["whisper"]["download_root"])
+        return dict(self._tray_model_status_cache)
+
+    def _refresh_tray_audio_devices_cache(self) -> None:
+        try:
+            current = self.recorder.get_current_device_token()
+            devices: list[dict[str, str | bool]] = [
+                {"token": "default", "label": self._t("status_mic_default_full"), "is_default": True}
+            ]
+            devices.extend(AudioRecorder.list_input_devices())
+        except Exception:
+            logging.exception("Failed to refresh tray audio device cache.")
+            return
+        self._tray_audio_devices_cache = devices
+        self._tray_audio_current_token = current
+        if hasattr(self, "tray"):
+            self.tray.update_audio_devices_snapshot(devices, current)
+
+    def _refresh_tray_model_status_cache(self) -> None:
+        try:
+            status = get_model_status(self.config["whisper"]["download_root"])
+        except Exception:
+            logging.exception("Failed to refresh tray model status cache.")
+            return
+        self._tray_model_status_cache = dict(status)
+        if hasattr(self, "tray"):
+            self.tray.update_model_status_snapshot(self._tray_model_status_cache)
 
     def _on_model_install_request(self, model: str) -> None:
         model = str(model)
@@ -1633,6 +1665,7 @@ class WhisperTypeApp:
         self.config["audio"]["device"] = None if device_token == "default" else int(device_token)
         self.config_manager.save(self.config)
         logging.info("Audio device persisted as %s", self.config["audio"]["device"])
+        self._refresh_tray_audio_devices_cache()
         self.tray.refresh_status()
 
     def _on_model_change(self, model: str) -> None:
@@ -1643,6 +1676,7 @@ class WhisperTypeApp:
         self.config["whisper"]["model"] = model
         self.config_manager.save(self.config)
         self.transcriber.set_model(model)
+        self._refresh_tray_model_status_cache()
         self.tray.set_selected(
             model=self.config["whisper"]["model"],
             transcription_language=self.config["whisper"]["language"],
@@ -1667,6 +1701,7 @@ class WhisperTypeApp:
         normalized = normalize_ui_language(language_ui)
         self.config["general"]["language_ui"] = normalized
         self.config_manager.save(self.config)
+        self._refresh_tray_audio_devices_cache()
         self.tray.set_selected(
             model=self.config["whisper"]["model"],
             transcription_language=self.config["whisper"]["language"],
@@ -1703,6 +1738,7 @@ class WhisperTypeApp:
 
         if self._audio_device_fingerprint is None:
             self._audio_device_fingerprint = fingerprint
+            self._refresh_tray_audio_devices_cache()
             return
 
         if fingerprint == self._audio_device_fingerprint:
@@ -1710,6 +1746,7 @@ class WhisperTypeApp:
 
         logging.info("Audio device list changed – re-initialising PortAudio.")
         self._audio_device_fingerprint = fingerprint
+        self._refresh_tray_audio_devices_cache()
 
         try:
             import sounddevice as _sd  # noqa: PLC0415
@@ -1773,6 +1810,7 @@ class WhisperTypeApp:
             self.overlay.show_error(self._t("model_install_failed", model=model), ms=1400)
             self._show_tray_message(self._t("model_install_failed", model=model))
 
+        self._refresh_tray_model_status_cache()
         self.tray.refresh_status()
         self.tray.set_selected(
             model=self.config["whisper"]["model"],

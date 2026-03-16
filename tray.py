@@ -472,6 +472,10 @@ class AppTray(QSystemTrayIcon):
         self._current_transcription_language = ""
         self._current_backend = ""
         self._current_microphone = ""
+        self._cached_audio_devices: list[AudioDeviceItem] = []
+        self._cached_audio_current_token = "default"
+        self._cached_model_status: dict[str, bool] = {}
+        self._last_audio_snapshot_key: tuple | None = None
 
         self._model_actions: dict[str, QAction] = {}
         self._transcription_language_actions: dict[str, QAction] = {}
@@ -504,6 +508,13 @@ class AppTray(QSystemTrayIcon):
         self.setContextMenu(self.menu)
         self.activated.connect(self._handle_activated)
         self._retranslate()
+
+    def update_audio_devices_snapshot(self, devices: list[AudioDeviceItem], current_token: str) -> None:
+        self._cached_audio_devices = [dict(item) for item in devices]
+        self._cached_audio_current_token = str(current_token or "default")
+
+    def update_model_status_snapshot(self, status: dict[str, bool]) -> None:
+        self._cached_model_status = dict(status or {})
 
     def _debug_trace(self, event: str) -> None:
         try:
@@ -738,15 +749,37 @@ class AppTray(QSystemTrayIcon):
             self._invoke_callback("tray_click_open_settings", self._on_open_settings)
 
     def _rebuild_audio_menu(self) -> None:
+        if not self._cached_audio_devices:
+            try:
+                devices, current_token = self._audio_devices_provider()
+                self.update_audio_devices_snapshot(devices, current_token)
+            except Exception:
+                pass
+
+        snapshot_key = (
+            self._cached_audio_current_token,
+            tuple(
+                (
+                    str(item.get("token", "")),
+                    str(item.get("label", "")),
+                    bool(item.get("is_default", False)),
+                )
+                for item in self._cached_audio_devices
+            ),
+        )
+        if snapshot_key == self._last_audio_snapshot_key:
+            return
+        self._last_audio_snapshot_key = snapshot_key
+
         self._audio_menu.clear()
         self._audio_actions.clear()
         self._audio_group = QActionGroup(self)
         self._audio_group.setExclusive(True)
 
-        try:
-            devices, current_token = self._audio_devices_provider()
-        except Exception as exc:
-            error_action = QAction(f"{self._t('tray_error_prefix')}: {exc}", self)
+        devices = self._cached_audio_devices
+        current_token = self._cached_audio_current_token
+        if not devices:
+            error_action = QAction(self._t("status_mic_default_short"), self)
             error_action.setEnabled(False)
             self._audio_menu.addAction(error_action)
             self._current_microphone = self._t("status_mic_default_short")
@@ -802,10 +835,11 @@ class AppTray(QSystemTrayIcon):
 
     def _model_status(self) -> dict[str, bool]:
         try:
-            return self._model_status_provider()
+            status = self._model_status_provider()
+            self.update_model_status_snapshot(status)
         except Exception:
             log.exception("Could not read model status")
-            return {}
+        return dict(self._cached_model_status)
 
     def _update_unload_row(self) -> None:
         available = False

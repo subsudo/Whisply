@@ -13,7 +13,9 @@ from PySide6.QtWidgets import QApplication
 from first_run_dialog import FirstRunSetupDialog
 from main import WhisperTypeApp, _is_cuda_fallback_oom
 from overlay import OverlayWidget
+from settings_dialog import SettingsDialog
 from transcriber import Transcriber
+from tray import AppTray
 
 
 class _FakeSignal:
@@ -43,9 +45,16 @@ class _FailingTranscriber:
 class _FakeButton:
     def __init__(self) -> None:
         self.enabled = True
+        self.visible = True
 
     def setEnabled(self, enabled: bool) -> None:
         self.enabled = enabled
+
+    def show(self) -> None:
+        self.visible = True
+
+    def hide(self) -> None:
+        self.visible = False
 
 
 class _FakeLabel:
@@ -54,6 +63,23 @@ class _FakeLabel:
 
     def setText(self, text: str) -> None:
         self.text = text
+
+
+class _DirectEmit:
+    def __init__(self, callback) -> None:  # noqa: ANN001
+        self._callback = callback
+
+    def emit(self, *args) -> None:  # noqa: ANN001
+        self._callback(*args)
+
+
+class _ImmediateThread:
+    def __init__(self, target=None, name=None, daemon=None) -> None:  # noqa: ANN001
+        self._target = target
+
+    def start(self) -> None:
+        if self._target is not None:
+            self._target()
 
 
 class _FakeCloseEvent:
@@ -253,6 +279,63 @@ class StabilityRound1Tests(unittest.TestCase):
         self.assertFalse(dialog.skip_button.enabled)
         self.assertEqual(dialog.status_label.text, "running")
         self.assertTrue(event.ignored)
+
+    def test_tray_refresh_status_uses_cached_audio_snapshot(self) -> None:
+        audio_provider = Mock(
+            return_value=(
+                [{"token": "default", "label": "Default microphone", "is_default": True}],
+                "default",
+            )
+        )
+        tray = AppTray(
+            icon_path="",
+            short_status_provider=lambda: "short",
+            full_status_provider=lambda: "full",
+            ui_language_provider=lambda: "en",
+            model_status_provider=lambda: {"medium": True},
+            on_model=lambda model: None,
+            on_model_install=lambda model: None,
+            on_transcription_language=lambda lang: None,
+            on_backend=lambda backend: None,
+            audio_devices_provider=audio_provider,
+            on_audio_device=lambda token: None,
+            on_open_settings=lambda: None,
+            unload_available_provider=lambda: True,
+            unload_never_provider=lambda: False,
+            on_unload_model=lambda: None,
+            on_toggle_unload_never=lambda: None,
+            rescue_copy_available_provider=lambda: False,
+            on_copy_last_dictation=lambda: None,
+            on_quit=lambda: None,
+        )
+
+        self.assertEqual(audio_provider.call_count, 1)
+        tray.refresh_status()
+        tray.refresh_status()
+        self.assertEqual(audio_provider.call_count, 1)
+        tray.hide()
+        tray.deleteLater()
+
+    def test_settings_cuda_status_refresh_runs_async_and_applies_result(self) -> None:
+        dialog = SettingsDialog.__new__(SettingsDialog)
+        dialog._cuda_status_provider = Mock(return_value={"text": "CUDA ready", "downloadable": True})
+        dialog._on_cuda_download = lambda: True
+        dialog._cuda_refresh_generation = 0
+        dialog._cuda_refresh_in_flight = False
+        dialog.cuda_status_value = _FakeLabel()
+        dialog.cuda_download_button = _FakeButton()
+        dialog._t = lambda key, **kwargs: "unknown"
+        dialog._signals = types.SimpleNamespace(
+            cuda_status_ready=_DirectEmit(lambda generation, state: SettingsDialog._apply_cuda_status_result(dialog, generation, state))
+        )
+
+        with patch("settings_dialog.threading.Thread", _ImmediateThread):
+            SettingsDialog._refresh_cuda_status(dialog)
+
+        self.assertFalse(dialog._cuda_refresh_in_flight)
+        self.assertEqual(dialog.cuda_status_value.text, "CUDA ready")
+        self.assertTrue(dialog.cuda_download_button.visible)
+        self.assertTrue(dialog.cuda_download_button.enabled)
 
 
 if __name__ == "__main__":
