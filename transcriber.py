@@ -93,6 +93,7 @@ class Transcriber:
                 progress_stop = threading.Event()
                 load_complete = threading.Event()
                 progress_thread: threading.Thread | None = None
+                load_succeeded = False
                 try:
                     if self._on_model_load_progress:
                         try:
@@ -111,11 +112,17 @@ class Transcriber:
                                 self._estimated_warmup_duration_sec(self.model_size),
                             )
                     self.backend.load_model(self.model_size)
+                    load_succeeded = True
                 except Exception as exc:
                     if self._is_cuda_backend():
                         self._fallback_from_cuda_to_cpu_locked(exc)
+                        load_succeeded = True
                     else:
+                        self._model_loaded = False
                         raise
+                except BaseException:
+                    self._model_loaded = False
+                    raise
                 finally:
                     observed_load_sec = max(0.05, time.monotonic() - load_started_at)
                     if load_mode == "warmup":
@@ -139,13 +146,14 @@ class Transcriber:
                             self._on_model_load_done()
                         except Exception:
                             log.exception("on_model_load_done callback failed")
-                self._model_loaded = True
-                if self.download_root:
+                self._model_loaded = load_succeeded
+                if load_succeeded and self.download_root:
                     try:
                         mark_installed(self.model_size, self.download_root)
                     except Exception:
                         log.exception("Failed to update installed model store after model load.")
-                log.info("Model loaded.")
+                if load_succeeded:
+                    log.info("Model loaded.")
             log.info(
                 "Transcribing with model=%s language=%s beam_size=%s backend=%s",
                 self.model_size,

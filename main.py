@@ -146,6 +146,13 @@ from transcriber import Transcriber
 from vad import has_speech
 
 
+def _is_cuda_fallback_oom(reason: str) -> bool:
+    reason_lower = str(reason).lower()
+    has_out_of_memory = "out of memory" in reason_lower
+    has_cuda_alloc = "alloc" in reason_lower and "cuda" in reason_lower
+    return has_out_of_memory or has_cuda_alloc
+
+
 class EventBridge(QObject):
     start_recording = Signal()
     stop_recording = Signal()
@@ -1087,8 +1094,7 @@ class WhisperTypeApp:
 
     def _on_cuda_fallback(self, reason: str) -> None:
         logging.warning("CUDA fallback triggered: %s", reason)
-        reason_lower = str(reason).lower()
-        is_oom = "out of memory" in reason_lower or "alloc" in reason_lower and "cuda" in reason_lower
+        is_oom = _is_cuda_fallback_oom(reason)
         if is_oom:
             self._show_tray_message(self._t("cuda_fallback_oom_notice"))
             self.overlay.show_warning(self._t("cuda_fallback_oom_notice"), ms=1800)
@@ -1895,8 +1901,23 @@ class WhisperTypeApp:
         else:
             self._transcribing_delay_timer.start(self._transcribing_delay_ms)
 
-        future = self.transcriber.transcribe_async(audio)
-        future.add_done_callback(self._on_transcription_done)
+        self._submit_transcription_job(audio)
+
+    def _submit_transcription_job(self, audio: np.ndarray) -> None:
+        try:
+            future = self.transcriber.transcribe_async(audio)
+            future.add_done_callback(self._on_transcription_done)
+        except Exception as exc:
+            logging.exception("Failed to submit transcription job")
+            self._transcription_in_progress = False
+            self._model_loading_active = False
+            self._discard_timed_out_result = False
+            self._cancel_transcribing_delay()
+            self._cancel_transcription_timeout()
+            self.bridge.transcription_error.emit(str(exc)[:80])
+            self.bridge.transcription_settled.emit()
+            if self._transcribe_lock.locked():
+                self._transcribe_lock.release()
 
     def _on_transcription_done(self, future) -> None:  # noqa: ANN001
         try:

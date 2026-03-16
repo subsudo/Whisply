@@ -321,9 +321,11 @@ class OverlayWidget(QWidget):
 
     def _complete_loading_completion(self) -> None:
         callback = self._loading_completion_callback
+        if callback is None:
+            return
+        # Consume the callback before invoking it so repeated ticks cannot re-fire it.
         self._loading_completion_callback = None
-        if callback is not None:
-            callback()
+        callback()
 
     def _reset_overlay_size(self) -> None:
         self.setFixedSize(self._base_width, self._base_height)
