@@ -237,6 +237,7 @@ class FirstRunSetupDialog(QDialog):
         self._download_root = download_root
         self._install_cuda_cb = install_cuda_cb
         self._worker: _FirstRunWorker | None = None
+        self._close_requested = False
         self._preinstalled_models = {str(m).strip().lower() for m in installed_models}
 
         self.cuda_attempted = False
@@ -447,6 +448,7 @@ class FirstRunSetupDialog(QDialog):
         self._worker.model_progress.connect(self._on_model_progress)
         self._worker.model_done.connect(self._on_model_done)
         self._worker.done.connect(self._on_done)
+        self._worker.finished.connect(self._on_worker_finished)
         self._worker.start()
 
     def _on_model_started(self, model: str, index: int, total: int) -> None:
@@ -489,6 +491,8 @@ class FirstRunSetupDialog(QDialog):
         self.models_progress.setValue(int(max(0.0, min(1.0, overall)) * 100))
 
     def _on_done(self, cuda_attempted: bool, cuda_ok: bool, installed: list, failed: list) -> None:
+        if self._close_requested:
+            return
         self.cuda_attempted = bool(cuda_attempted)
         self.cuda_success = bool(cuda_ok) if cuda_attempted else False
         self.installed_models = [str(x) for x in installed]
@@ -506,6 +510,11 @@ class FirstRunSetupDialog(QDialog):
         self.skip_button.clicked.disconnect()
         self.skip_button.clicked.connect(self.accept)
 
+    def _on_worker_finished(self) -> None:
+        self._worker = None
+        if self._close_requested:
+            self.reject()
+
     def result_payload(self) -> dict[str, object]:
         return {
             "cuda_attempted": self.cuda_attempted,
@@ -517,10 +526,12 @@ class FirstRunSetupDialog(QDialog):
 
     def closeEvent(self, event) -> None:  # noqa: ANN001
         if self._worker is not None and self._worker.isRunning():
+            self._close_requested = True
             self._worker.requestInterruption()
-            if not self._worker.wait(3000):
-                # Keep dialog alive until worker has stopped to avoid destroying a running thread.
-                self.status_label.setText(self._t("first_run_status_running"))
-                event.ignore()
-                return
+            self._set_options_enabled(False)
+            self.start_button.setEnabled(False)
+            self.skip_button.setEnabled(False)
+            self.status_label.setText(self._t("first_run_status_running"))
+            event.ignore()
+            return
         super().closeEvent(event)

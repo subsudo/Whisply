@@ -10,6 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
+from first_run_dialog import FirstRunSetupDialog
 from main import WhisperTypeApp, _is_cuda_fallback_oom
 from overlay import OverlayWidget
 from transcriber import Transcriber
@@ -37,6 +38,42 @@ class _FakeTimer:
 class _FailingTranscriber:
     def transcribe_async(self, audio: np.ndarray):  # noqa: ANN001
         raise RuntimeError("submit failed")
+
+
+class _FakeButton:
+    def __init__(self) -> None:
+        self.enabled = True
+
+    def setEnabled(self, enabled: bool) -> None:
+        self.enabled = enabled
+
+
+class _FakeLabel:
+    def __init__(self) -> None:
+        self.text = ""
+
+    def setText(self, text: str) -> None:
+        self.text = text
+
+
+class _FakeCloseEvent:
+    def __init__(self) -> None:
+        self.ignored = False
+
+    def ignore(self) -> None:
+        self.ignored = True
+
+
+class _FakeWorker:
+    def __init__(self, running: bool = True) -> None:
+        self.running = running
+        self.interruption_requested = False
+
+    def isRunning(self) -> bool:  # noqa: N802
+        return self.running
+
+    def requestInterruption(self) -> None:
+        self.interruption_requested = True
 
 
 class StabilityRound1Tests(unittest.TestCase):
@@ -130,6 +167,92 @@ class StabilityRound1Tests(unittest.TestCase):
         self.assertEqual(warmup_calls, ["warmup"])
         overlay.hide_immediate()
         overlay.deleteLater()
+
+    def test_overlay_message_timer_is_single_and_disarmed_on_state_change(self) -> None:
+        config = {
+            "width": 220,
+            "height": 72,
+            "bottom_offset": 100,
+            "opacity": 1.0,
+            "monitor_index": -1,
+            "waveform_gradient_left": "#56F64E",
+            "waveform_gradient_right": "#0096FF",
+        }
+        overlay = OverlayWidget(config)
+        overlay.show_notice("first", ms=1000)
+        timer = overlay._error_fade_timer
+        first_generation = overlay._message_fade_generation
+
+        overlay.show_warning("second", ms=1000)
+        self.assertIs(timer, overlay._error_fade_timer)
+        self.assertGreater(overlay._message_fade_generation, first_generation)
+
+        overlay.state = "loading"
+        overlay._fade_target = 1.0
+        overlay._on_error_fade_timeout()
+        self.assertEqual(overlay._fade_target, 1.0)
+        overlay.hide_immediate()
+        overlay.deleteLater()
+
+    def test_overlay_audio_levels_handle_cross_thread_updates(self) -> None:
+        config = {
+            "width": 220,
+            "height": 72,
+            "bottom_offset": 100,
+            "opacity": 1.0,
+            "monitor_index": -1,
+            "waveform_gradient_left": "#56F64E",
+            "waveform_gradient_right": "#0096FF",
+        }
+        overlay = OverlayWidget(config)
+        overlay.state = "recording"
+        overlay._fade = 1.0
+        overlay._fade_target = 1.0
+
+        stop_event = threading.Event()
+        errors: list[Exception] = []
+
+        def writer() -> None:
+            try:
+                while not stop_event.is_set():
+                    overlay.set_audio_levels([0.1] * 12)
+                    overlay.set_audio_levels([0.8] * 12)
+            except Exception as exc:  # pragma: no cover - defensive capture
+                errors.append(exc)
+
+        thread = threading.Thread(target=writer, daemon=True)
+        thread.start()
+        try:
+            for _ in range(200):
+                overlay._tick()
+        finally:
+            stop_event.set()
+            thread.join(timeout=1.0)
+
+        self.assertEqual(errors, [])
+        overlay.hide_immediate()
+        overlay.deleteLater()
+
+    def test_first_run_close_requests_interrupt_without_blocking_wait(self) -> None:
+        dialog = FirstRunSetupDialog.__new__(FirstRunSetupDialog)
+        dialog._worker = _FakeWorker(running=True)
+        dialog._close_requested = False
+        dialog.start_button = _FakeButton()
+        dialog.skip_button = _FakeButton()
+        dialog.status_label = _FakeLabel()
+        dialog._set_options_enabled = Mock()
+        dialog._t = lambda key, **kwargs: "running"
+
+        event = _FakeCloseEvent()
+        FirstRunSetupDialog.closeEvent(dialog, event)
+
+        self.assertTrue(dialog._close_requested)
+        self.assertTrue(dialog._worker.interruption_requested)
+        dialog._set_options_enabled.assert_called_once_with(False)
+        self.assertFalse(dialog.start_button.enabled)
+        self.assertFalse(dialog.skip_button.enabled)
+        self.assertEqual(dialog.status_label.text, "running")
+        self.assertTrue(event.ignored)
 
 
 if __name__ == "__main__":

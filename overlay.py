@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import math
+import threading
 
 from PySide6.QtCore import QPoint, QRect, QTimer, Qt
 from PySide6.QtGui import QColor, QFontMetrics, QLinearGradient, QPainter, QPainterPath
@@ -54,6 +55,8 @@ class OverlayWidget(QWidget):
         self._base_height = int(config["height"])
 
         self._error_fade_timer:       QTimer | None = None
+        self._message_fade_generation = 0
+        self._armed_message_fade_generation = 0
         self._warmup_finish_timer:    QTimer | None = None
         self._warmup_finish_progress  = 0.0
         self._warmup_finish_step      = 0.0
@@ -68,6 +71,7 @@ class OverlayWidget(QWidget):
         self._bar_display_levels = [0.0] * _BARS   # smoothed display value
         self._bar_peaks          = [_INITIAL_BAR_PEAK] * _BARS  # adaptive peak
         self._idle_phase         = 0.0             # drives breathing wave
+        self._audio_levels_lock  = threading.Lock()
 
         self.setFixedSize(self._base_width, self._base_height)
         self.setWindowFlags(
@@ -123,9 +127,10 @@ class OverlayWidget(QWidget):
         self.state   = "recording"
         self.message = ""
         self._reset_overlay_size()
-        self._bar_targets        = [0.0] * _BARS
+        with self._audio_levels_lock:
+            self._bar_targets = [0.0] * _BARS
+            self._bar_peaks = [_INITIAL_BAR_PEAK] * _BARS
         self._bar_display_levels = [0.0] * _BARS
-        self._bar_peaks          = [_INITIAL_BAR_PEAK] * _BARS
         self._idle_phase         = 0.0
         self.place_bottom_center()
         self._begin_fade_in()
@@ -201,6 +206,8 @@ class OverlayWidget(QWidget):
         self._cancel_error_timer()
         self._cancel_model_warmup_finish()
         self._loading_completion_callback = None
+        self._message_fade_generation += 1
+        self._armed_message_fade_generation = self._message_fade_generation
         self.state   = "message"
         self.message = msg
         self._message_level = str(level or "notice")
@@ -210,22 +217,23 @@ class OverlayWidget(QWidget):
         if self._error_fade_timer is None:
             self._error_fade_timer = QTimer(self)
             self._error_fade_timer.setSingleShot(True)
-            self._error_fade_timer.timeout.connect(self._begin_fade_out)
+            self._error_fade_timer.timeout.connect(self._on_error_fade_timeout)
         self._error_fade_timer.start(max(0, int(ms)))
 
     def set_audio_levels(self, levels: list[float]) -> None:
         """Receive 12 per-band FFT levels; update adaptive peaks and targets."""
-        for i in range(min(len(levels), _BARS)):
-            raw = max(0.0, float(levels[i]))
-            # Slow-release adaptive peak preserves local loudness context.
-            if raw > self._bar_peaks[i]:
-                self._bar_peaks[i] = raw
-            else:
-                self._bar_peaks[i] = max(raw, self._bar_peaks[i] * 0.9985)
-            # Normalise then soft-knee compress to 0 … _MAX_VISUAL_LEVEL.
-            norm       = raw / max(1.0, self._bar_peaks[i])
-            compressed = 1.0 - math.exp(-norm * _BAND_COMPRESS)
-            self._bar_targets[i] = max(0.0, min(compressed * _MAX_VISUAL_LEVEL, _MAX_VISUAL_LEVEL))
+        with self._audio_levels_lock:
+            for i in range(min(len(levels), _BARS)):
+                raw = max(0.0, float(levels[i]))
+                # Slow-release adaptive peak preserves local loudness context.
+                if raw > self._bar_peaks[i]:
+                    self._bar_peaks[i] = raw
+                else:
+                    self._bar_peaks[i] = max(raw, self._bar_peaks[i] * 0.9985)
+                # Normalise then soft-knee compress to 0 … _MAX_VISUAL_LEVEL.
+                norm       = raw / max(1.0, self._bar_peaks[i])
+                compressed = 1.0 - math.exp(-norm * _BAND_COMPRESS)
+                self._bar_targets[i] = max(0.0, min(compressed * _MAX_VISUAL_LEVEL, _MAX_VISUAL_LEVEL))
 
     def finish_model_warmup(self, ms: int = 220, on_finished: Callable[[], None] | None = None) -> None:
         _ = ms
@@ -290,7 +298,9 @@ class OverlayWidget(QWidget):
         self._fade_target = 0.0
         self._reset_overlay_size()
         self._bar_display_levels = [0.0] * _BARS
-        self._bar_targets        = [0.0] * _BARS
+        with self._audio_levels_lock:
+            self._bar_targets = [0.0] * _BARS
+            self._bar_peaks = [_INITIAL_BAR_PEAK] * _BARS
         self._loading_progress   = 0
         self._display_loading_progress = 0.0
         self.setWindowOpacity(0.0)
@@ -310,6 +320,15 @@ class OverlayWidget(QWidget):
     def _cancel_error_timer(self) -> None:
         if self._error_fade_timer and self._error_fade_timer.isActive():
             self._error_fade_timer.stop()
+        self._armed_message_fade_generation = 0
+
+    def _on_error_fade_timeout(self) -> None:
+        if self.state != "message":
+            return
+        if self._armed_message_fade_generation != self._message_fade_generation:
+            return
+        self._armed_message_fade_generation = 0
+        self._begin_fade_out()
 
     def _cancel_model_warmup_finish(self) -> None:
         if self._warmup_finish_timer and self._warmup_finish_timer.isActive():
@@ -390,7 +409,9 @@ class OverlayWidget(QWidget):
                 self._complete_loading_completion()
 
         if self.state == "recording":
-            is_idle = max(self._bar_targets) < _ANIMATION_IDLE_CUTOFF
+            with self._audio_levels_lock:
+                bar_targets = list(self._bar_targets)
+            is_idle = max(bar_targets) < _ANIMATION_IDLE_CUTOFF
             if is_idle:
                 # Smoothly decay bars → zero; advance breathing phase.
                 for i in range(_BARS):
@@ -401,7 +422,7 @@ class OverlayWidget(QWidget):
             else:
                 # Per-bar attack / decay smoothing.
                 for i in range(_BARS):
-                    tgt = self._bar_targets[i]
+                    tgt = bar_targets[i]
                     cur = self._bar_display_levels[i]
                     if tgt > cur:
                         self._bar_display_levels[i] = min(1.0, cur + (tgt - cur) * _BAR_ATTACK[i])
