@@ -153,6 +153,10 @@ def _is_cuda_fallback_oom(reason: str) -> bool:
     return has_out_of_memory or has_cuda_alloc
 
 
+def _should_persist_first_run_wizard(payload: dict[str, object]) -> bool:
+    return not bool(payload.get("setup_aborted", False))
+
+
 class EventBridge(QObject):
     start_recording = Signal()
     stop_recording = Signal()
@@ -1493,6 +1497,10 @@ class WhisperTypeApp:
             )
             dialog.exec()
             payload = dialog.result_payload()
+            if not _should_persist_first_run_wizard(payload):
+                logging.info("First-run optional setup aborted; wizard marker will not be written.")
+                self._refresh_tray_model_status_cache()
+                return
 
             if bool(payload.get("cuda_success", False)):
                 _register_cuda_dll_paths()
@@ -1518,8 +1526,9 @@ class WhisperTypeApp:
                     self._t("first_run_restart_recommended"),
                 )
 
-            wizard_marker.parent.mkdir(parents=True, exist_ok=True)
-            wizard_marker.write_text("ok", encoding="utf-8")
+            if _should_persist_first_run_wizard(payload):
+                wizard_marker.parent.mkdir(parents=True, exist_ok=True)
+                wizard_marker.write_text("ok", encoding="utf-8")
         except Exception:
             logging.exception("First-run optional setup failed.")
 

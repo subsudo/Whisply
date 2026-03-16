@@ -10,8 +10,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from first_run_dialog import FirstRunSetupDialog
-from main import WhisperTypeApp, _is_cuda_fallback_oom
+from first_run_dialog import FirstRunSetupDialog, _FirstRunWorker
+from main import WhisperTypeApp, _is_cuda_fallback_oom, _should_persist_first_run_wizard
 from overlay import OverlayWidget
 from settings_dialog import SettingsDialog
 from transcriber import Transcriber
@@ -100,6 +100,14 @@ class _FakeWorker:
 
     def requestInterruption(self) -> None:
         self.interruption_requested = True
+
+
+class _DoneCollector:
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def emit(self, *args) -> None:
+        self.calls.append(args)
 
 
 class StabilityRound1Tests(unittest.TestCase):
@@ -263,22 +271,65 @@ class StabilityRound1Tests(unittest.TestCase):
         dialog = FirstRunSetupDialog.__new__(FirstRunSetupDialog)
         dialog._worker = _FakeWorker(running=True)
         dialog._close_requested = False
+        dialog._setup_aborted = False
         dialog.start_button = _FakeButton()
         dialog.skip_button = _FakeButton()
         dialog.status_label = _FakeLabel()
         dialog._set_options_enabled = Mock()
-        dialog._t = lambda key, **kwargs: "running"
+        dialog._t = lambda key, **kwargs: "aborted"
 
         event = _FakeCloseEvent()
         FirstRunSetupDialog.closeEvent(dialog, event)
 
         self.assertTrue(dialog._close_requested)
+        self.assertTrue(dialog._setup_aborted)
         self.assertTrue(dialog._worker.interruption_requested)
         dialog._set_options_enabled.assert_called_once_with(False)
         self.assertFalse(dialog.start_button.enabled)
         self.assertFalse(dialog.skip_button.enabled)
-        self.assertEqual(dialog.status_label.text, "running")
+        self.assertEqual(dialog.status_label.text, "aborted")
         self.assertTrue(event.ignored)
+
+    def test_first_run_worker_marks_aborted_when_interrupted(self) -> None:
+        collector = _DoneCollector()
+        thread = _FirstRunWorker(
+            install_cuda=False,
+            install_cuda_cb=lambda cb=None: (True, "ok"),
+            models=["medium"],
+            backend_hint="cpu",
+            download_root=".",
+        )
+        thread.done.connect(collector.emit)
+        with patch.object(thread, "isInterruptionRequested", return_value=True), patch(
+            "first_run_dialog.ensure_model_installed"
+        ) as ensure_model_installed:
+            thread.run()
+
+        self.assertEqual(len(collector.calls), 1)
+        self.assertTrue(collector.calls[0][-1])
+        ensure_model_installed.assert_not_called()
+
+    def test_first_run_payload_reports_aborted_setup(self) -> None:
+        dialog = FirstRunSetupDialog.__new__(FirstRunSetupDialog)
+        dialog.cuda_attempted = False
+        dialog.cuda_success = False
+        dialog.installed_models = []
+        dialog.failed_models = []
+        dialog.restart_recommended = False
+        dialog._setup_started = True
+        dialog._setup_finished = False
+        dialog._setup_aborted = True
+
+        payload = FirstRunSetupDialog.result_payload(dialog)
+
+        self.assertTrue(payload["setup_started"])
+        self.assertFalse(payload["setup_finished"])
+        self.assertTrue(payload["setup_aborted"])
+
+    def test_first_run_wizard_marker_not_persisted_for_aborted_payload(self) -> None:
+        self.assertFalse(_should_persist_first_run_wizard({"setup_aborted": True}))
+        self.assertTrue(_should_persist_first_run_wizard({"setup_aborted": False}))
+        self.assertTrue(_should_persist_first_run_wizard({}))
 
     def test_tray_refresh_status_uses_cached_audio_snapshot(self) -> None:
         audio_provider = Mock(

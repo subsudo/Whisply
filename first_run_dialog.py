@@ -164,7 +164,7 @@ class _FirstRunWorker(QThread):
     model_started = Signal(str, int, int)
     model_progress = Signal(int)
     model_done = Signal(str, bool, str)
-    done = Signal(bool, bool, list, list)
+    done = Signal(bool, bool, list, list, bool)
 
     def __init__(
         self,
@@ -183,18 +183,22 @@ class _FirstRunWorker(QThread):
 
     def run(self) -> None:
         cuda_ok = True
+        aborted = False
         try:
             if self._install_cuda:
                 cuda_ok, _ = self._install_cuda_cb(lambda p: self.cuda_progress.emit(int(p)))
         except Exception as exc:
             log.exception("First-run CUDA install step failed: %s", exc)
             cuda_ok = False
+        if self.isInterruptionRequested():
+            aborted = True
 
         installed: list[str] = []
         failed: list[str] = []
         total = len(self._models)
         for idx, model in enumerate(self._models, start=1):
             if self.isInterruptionRequested():
+                aborted = True
                 break
             self.model_started.emit(model, idx, total)
             try:
@@ -207,13 +211,16 @@ class _FirstRunWorker(QThread):
             except Exception as exc:
                 log.exception("First-run model install crashed for '%s': %s", model, exc)
                 ok, reason = False, str(exc)
+            if self.isInterruptionRequested():
+                aborted = True
+                break
             self.model_done.emit(model, ok, reason)
             if ok:
                 installed.append(model)
             else:
                 failed.append(model)
 
-        self.done.emit(self._install_cuda, cuda_ok, installed, failed)
+        self.done.emit(self._install_cuda, cuda_ok, installed, failed, aborted)
 
 
 class FirstRunSetupDialog(QDialog):
@@ -238,6 +245,9 @@ class FirstRunSetupDialog(QDialog):
         self._install_cuda_cb = install_cuda_cb
         self._worker: _FirstRunWorker | None = None
         self._close_requested = False
+        self._setup_aborted = False
+        self._setup_started = False
+        self._setup_finished = False
         self._preinstalled_models = {str(m).strip().lower() for m in installed_models}
 
         self.cuda_attempted = False
@@ -425,6 +435,9 @@ class FirstRunSetupDialog(QDialog):
             self.accept()
             return
 
+        self._setup_started = True
+        self._setup_finished = False
+        self._setup_aborted = False
         self._set_options_enabled(False)
         self.skip_button.setEnabled(False)
         self.status_label.setText(self._t("first_run_status_running"))
@@ -452,6 +465,8 @@ class FirstRunSetupDialog(QDialog):
         self._worker.start()
 
     def _on_model_started(self, model: str, index: int, total: int) -> None:
+        if self._close_requested or self._setup_aborted:
+            return
         self.current_model_label.setText(f"{model} ({index}/{total})")
         self.current_model_progress.setValue(0)
         self._active_model_index = max(1, index)
@@ -459,12 +474,16 @@ class FirstRunSetupDialog(QDialog):
         self._update_models_progress()
 
     def _on_model_progress(self, progress: int) -> None:
+        if self._close_requested or self._setup_aborted:
+            return
         clamped = max(0, min(100, int(progress)))
         self._active_model_progress = clamped
         self.current_model_progress.setValue(clamped)
         self._update_models_progress()
 
     def _on_model_done(self, model: str, ok: bool, reason: str) -> None:
+        if self._close_requested or self._setup_aborted:
+            return
         if ok:
             if model not in self.installed_models:
                 self.installed_models.append(model)
@@ -490,8 +509,14 @@ class FirstRunSetupDialog(QDialog):
             overall = (completed_before_current + current_fraction) / total
         self.models_progress.setValue(int(max(0.0, min(1.0, overall)) * 100))
 
-    def _on_done(self, cuda_attempted: bool, cuda_ok: bool, installed: list, failed: list) -> None:
+    def _on_done(self, cuda_attempted: bool, cuda_ok: bool, installed: list, failed: list, aborted: bool) -> None:
         if self._close_requested:
+            self._setup_aborted = True
+            return
+        self._setup_finished = True
+        self._setup_aborted = bool(aborted)
+        if self._setup_aborted:
+            self.status_label.setText(self._t("first_run_status_aborted"))
             return
         self.cuda_attempted = bool(cuda_attempted)
         self.cuda_success = bool(cuda_ok) if cuda_attempted else False
@@ -513,6 +538,7 @@ class FirstRunSetupDialog(QDialog):
     def _on_worker_finished(self) -> None:
         self._worker = None
         if self._close_requested:
+            self._setup_aborted = True
             self.reject()
 
     def result_payload(self) -> dict[str, object]:
@@ -522,16 +548,20 @@ class FirstRunSetupDialog(QDialog):
             "installed_models": list(self.installed_models),
             "failed_models": list(self.failed_models),
             "restart_recommended": self.restart_recommended,
+            "setup_started": self._setup_started,
+            "setup_finished": self._setup_finished,
+            "setup_aborted": self._setup_aborted,
         }
 
     def closeEvent(self, event) -> None:  # noqa: ANN001
         if self._worker is not None and self._worker.isRunning():
             self._close_requested = True
+            self._setup_aborted = True
             self._worker.requestInterruption()
             self._set_options_enabled(False)
             self.start_button.setEnabled(False)
             self.skip_button.setEnabled(False)
-            self.status_label.setText(self._t("first_run_status_running"))
+            self.status_label.setText(self._t("first_run_status_aborted"))
             event.ignore()
             return
         super().closeEvent(event)
