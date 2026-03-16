@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 import logging
+import math
 from pathlib import Path
 import threading
 import time
@@ -219,10 +220,18 @@ class Transcriber:
             duration = max(0.35, float(estimated_duration_sec))
             last_progress = -1
             tick_sec = 0.04
+            linear_cap = 88.0
+            overrun_cap = 97.0
 
             while not stop_event.wait(tick_sec):
                 elapsed = max(0.0, time.monotonic() - start)
-                progress = min(94, int((elapsed / duration) * 94.0))
+                if elapsed <= duration:
+                    progress = int((elapsed / duration) * linear_cap)
+                else:
+                    overrun_elapsed = elapsed - duration
+                    tail_ratio = 1.0 - math.exp(-overrun_elapsed / max(0.28, duration * 0.35))
+                    progress = int(linear_cap + ((overrun_cap - linear_cap) * tail_ratio))
+                progress = min(int(overrun_cap), max(0, progress))
                 if progress == last_progress:
                     if load_complete_event.is_set():
                         break
@@ -244,7 +253,7 @@ class Transcriber:
             if remaining <= 0:
                 return
 
-            finish_sec = min(0.9, max(0.18, (remaining / 94.0) * duration))
+            finish_sec = min(0.28, max(0.14, 0.10 + (remaining / 100.0) * 0.18))
             finish_started_at = time.monotonic()
 
             while not stop_event.wait(0.03):

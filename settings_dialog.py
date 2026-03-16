@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -43,8 +44,8 @@ QGroupBox {
     background: #252b35;
     border: 1px solid #2d3340;
     border-radius: 8px;
-    margin-top: 20px;
-    padding: 6px 10px 8px 10px;
+    margin-top: 18px;
+    padding: 5px 9px 7px 9px;
     font-size: 8pt;
     font-weight: 700;
     color: #6b7585;
@@ -52,7 +53,7 @@ QGroupBox {
 QGroupBox::title {
     subcontrol-origin: margin;
     subcontrol-position: top left;
-    left: 10px;
+    left: 8px;
     padding: 0 4px;
     color: #6b7585;
     font-size: 8pt;
@@ -67,7 +68,7 @@ QLineEdit, QComboBox {
     background: #1f232a;
     border: 1px solid #384151;
     border-radius: 6px;
-    padding: 5px 8px;
+    padding: 4px 8px;
     color: #d8dde8;
     font-size: 9pt;
 }
@@ -91,7 +92,7 @@ QSpinBox {
     background: #1f232a;
     border: 1px solid #384151;
     border-radius: 6px;
-    padding: 5px 7px;
+    padding: 4px 7px;
     color: #d8dde8;
     font-size: 9pt;
 }
@@ -125,7 +126,7 @@ QPushButton {
     background: #2a303a;
     border: 1px solid #384151;
     border-radius: 6px;
-    padding: 5px 12px;
+    padding: 4px 10px;
     color: #b8c0cc;
     font-size: 9pt;
 }
@@ -133,22 +134,29 @@ QPushButton:hover { background: #323b48; border-color: #4d5a70; }
 QPushButton:disabled { background: #1e232b; border-color: #2a303a; color: #4a5568; }
 
 QPushButton[infoButton="true"] {
-    min-width: 16px;
-    max-width: 16px;
-    min-height: 16px;
-    max-height: 16px;
+    min-width: 12px;
+    max-width: 12px;
+    min-height: 12px;
+    max-height: 12px;
     padding: 0px;
-    border-radius: 8px;
-    background: #2a303a;
-    border: 1px solid #445066;
-    color: #9fb0c4;
-    font-size: 8pt;
-    font-weight: 700;
+    border-radius: 6px;
+    background: #2d3440;
+    border: 1px solid #3a4351;
+    color: #7b8798;
+    font-size: 7pt;
+    font-weight: 600;
 }
 QPushButton[infoButton="true"]:hover {
-    background: #323b48;
-    border-color: #5b6a80;
-    color: #d4dfec;
+    background: #343d49;
+    border-color: #475264;
+    color: #aeb9c7;
+}
+
+QToolTip {
+    background-color: #252b35;
+    color: #d8dde8;
+    border: none;
+    padding: 6px 8px;
 }
 
 QFrame[frameShape="4"] {
@@ -165,8 +173,8 @@ QPushButton {
     border-radius: 6px;
     color: #c8d4e0;
     font-weight: 600;
-    padding: 6px 20px;
-    min-width: 80px;
+    padding: 5px 16px;
+    min-width: 74px;
     font-size: 9pt;
 }
 QPushButton:hover { background: #454f65; border-color: #6a7a90; }
@@ -177,7 +185,7 @@ QPushButton {
     background: transparent;
     border-color: transparent;
     color: #6b7585;
-    padding: 6px 16px;
+    padding: 5px 14px;
     font-size: 9pt;
 }
 QPushButton:hover { background: #252b35; border-color: #384151; color: #9aa3b0; }
@@ -213,16 +221,12 @@ class SettingsDialog(QDialog):
         self.setWindowTitle(self._t("settings_title"))
         self._set_window_icon()
         self.setModal(True)
-        self.resize(500, 520)
+        self.resize(480, 505)
         self.setStyleSheet(_QSS.replace("__CHECKMARK_URI__", self._checkmark_uri()))
 
         def tooltip(text: str) -> str:
-            safe = escape(str(text or ""))
-            return (
-                "<div style='max-width: 260px; white-space: normal; "
-                "color: #d8dde8; background: #252b35;'>"
-                f"{safe}</div>"
-            )
+            safe = escape(str(text or "")).replace("\n", "<br>")
+            return f"<div style='max-width: 240px; white-space: normal;'>{safe}</div>"
 
         def mk_form_label(text: str) -> QLabel:
             label = QLabel(text)
@@ -233,9 +237,8 @@ class SettingsDialog(QDialog):
             container = QWidget()
             layout = QHBoxLayout(container)
             layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(6)
+            layout.setSpacing(4)
             label = QLabel(text)
-            label.setFixedWidth(_FORM_LABEL_WIDTH - (22 if tooltip_text else 0))
             layout.addWidget(label)
             if tooltip_text:
                 info_btn = QPushButton("i")
@@ -243,6 +246,13 @@ class SettingsDialog(QDialog):
                 info_btn.setFocusPolicy(Qt.NoFocus)
                 info_btn.setToolTip(tooltip(tooltip_text))
                 info_btn.setCursor(Qt.PointingHandCursor)
+                info_btn.clicked.connect(
+                    lambda _checked=False, btn=info_btn, tip=tooltip_text: QToolTip.showText(
+                        btn.mapToGlobal(btn.rect().bottomLeft()),
+                        tooltip(tip),
+                        btn,
+                    )
+                )
                 layout.addWidget(info_btn)
             layout.addStretch()
             container.setFixedWidth(_FORM_LABEL_WIDTH)
@@ -482,17 +492,20 @@ class SettingsDialog(QDialog):
 
         # ── Layout ────────────────────────────────────────────────────────────
         root = QVBoxLayout(self)
-        root.setContentsMargins(14, 14, 14, 14)
-        root.setSpacing(10)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
 
         # Erkennung card — includes CUDA status (same card as in mockup)
         recognition_group = QGroupBox(self._t("settings_group_recognition").upper())
         recognition_form  = QFormLayout(recognition_group)
-        recognition_form.setSpacing(4)
-        add_row(recognition_form, self._t("settings_label_model"), self.model_combo)
-        model_hint = QLabel(self._t("settings_model_hint"))
-        model_hint.setStyleSheet("font-size: 8.5pt; color: #3f4b5f;")
-        recognition_form.addRow(mk_form_label(""), model_hint)
+        recognition_form.setVerticalSpacing(4)
+        recognition_form.setHorizontalSpacing(4)
+        add_row(
+            recognition_form,
+            self._t("settings_label_model"),
+            self.model_combo,
+            self._t("settings_model_info_tooltip"),
+        )
         add_row(
             recognition_form,
             self._t("settings_label_transcription_language"),
@@ -501,7 +514,8 @@ class SettingsDialog(QDialog):
         add_row(recognition_form, self._t("settings_label_backend"), self.backend_combo)
         input_group = QGroupBox(self._t("settings_group_input").upper())
         input_form  = QFormLayout(input_group)
-        input_form.setSpacing(4)
+        input_form.setVerticalSpacing(4)
+        input_form.setHorizontalSpacing(4)
         add_row(
             input_form,
             self._t("settings_label_hotkey"),
@@ -519,7 +533,7 @@ class SettingsDialog(QDialog):
 
         general_group = QGroupBox(self._t("settings_group_general").upper())
         general_form  = QFormLayout(general_group)
-        general_form.setVerticalSpacing(9)
+        general_form.setVerticalSpacing(6)
         general_form.setHorizontalSpacing(4)
         add_row(general_form, self._t("settings_label_ui_language"), self.ui_language_combo)
         add_row(general_form, self._t("settings_label_autostart_row"), autostart_container)
@@ -532,7 +546,8 @@ class SettingsDialog(QDialog):
 
         overlay_group = QGroupBox(self._t("settings_group_overlay").upper())
         overlay_form  = QFormLayout(overlay_group)
-        overlay_form.setSpacing(4)
+        overlay_form.setVerticalSpacing(4)
+        overlay_form.setHorizontalSpacing(4)
         add_row(overlay_form, self._t("settings_label_overlay_monitor"), self.overlay_monitor_combo)
         add_row(overlay_form, self._t("settings_label_waveform_style"), style_row)
         add_row(overlay_form, self._t("settings_label_waveform_primary"), self.waveform_primary_widget)

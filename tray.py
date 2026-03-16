@@ -127,6 +127,10 @@ QLabel#trayLabelQuit {
 QWidget#trayRow[role="quit"]:hover QLabel#trayLabelQuit {
     color: #e05555;
 }
+QLabel#trayLabelFooter {
+    color: #3f4856;
+    font-size: 10.5px;
+}
 """
 
 _SUBMENU_QSS = """
@@ -278,6 +282,11 @@ class _TrayRowWidget(QWidget):
             self.label.setObjectName("trayLabelQuit")
             self.value.hide()
             self.arrow.hide()
+        elif role == "footer":
+            self.setFixedHeight(18)
+            self.label.setObjectName("trayLabelFooter")
+            self.value.hide()
+            self.arrow.hide()
         else:
             self.setFixedHeight(31)
             self.label.setObjectName("trayLabelMain")
@@ -388,6 +397,9 @@ class _TrayRowWidget(QWidget):
             widget.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._role == "footer" and event.button() == Qt.LeftButton:
+            event.accept()
+            return
         if (
             self.isEnabled()
             and event.button() == Qt.LeftButton
@@ -398,6 +410,12 @@ class _TrayRowWidget(QWidget):
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._role == "footer" and event.button() == Qt.LeftButton:
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
 
 class AppTray(QSystemTrayIcon):
@@ -654,6 +672,8 @@ class AppTray(QSystemTrayIcon):
         self._rescue_copy_row.set_value_pill(self._t("tray_action_copy"))
         self._rescue_copy_row_action = self._add_row(self._rescue_copy_row)
 
+        self.menu.addSeparator()
+
         self._quit_row = _TrayRowWidget(
             role="quit",
             label=self._t("tray_menu_quit"),
@@ -661,6 +681,14 @@ class AppTray(QSystemTrayIcon):
             on_click=lambda: self._invoke_callback("quit", self._on_quit, close_menu=True),
         )
         self._add_row(self._quit_row)
+
+        self._footer_row = _TrayRowWidget(
+            role="footer",
+            label="",
+            clickable=False,
+        )
+        self._footer_row_action = self._add_row(self._footer_row)
+        self._footer_row_action.setEnabled(False)
 
     def _open_submenu(self, submenu: QMenu, anchor_action: QAction) -> None:
         row_rect = self.menu.actionGeometry(anchor_action)
@@ -763,6 +791,7 @@ class AppTray(QSystemTrayIcon):
         self._rescue_copy_row.set_label(self._t("tray_menu_last_dictation"))
         self._rescue_copy_row.set_value_pill(self._t("tray_action_copy"))
         self._quit_row.set_label(self._t("tray_menu_quit"))
+        self._footer_row.set_label("")
 
         self._model_row.set_value(self._current_model)
         self._transcription_row.set_value(self._current_transcription_language)
