@@ -56,6 +56,52 @@ class AudioRecorder:
     def set_level_callback(self, callback: Callable[[list[float]], None]) -> None:
         self._level_callback = callback
 
+    @staticmethod
+    def _enumerate_input_devices() -> tuple[list, list, int | None]:
+        devices = sd.query_devices()
+        hostapis = sd.query_hostapis()
+
+        default_idx: int | None = None
+        try:
+            default_input = sd.query_devices(kind="input")
+            default_idx = int(default_input["index"])
+        except Exception as exc:
+            log.warning("Default input device unavailable, falling back to first input: %s", exc)
+
+        return list(devices), list(hostapis), default_idx
+
+    @classmethod
+    def _first_available_input_device(cls) -> int | None:
+        try:
+            devices, _, _ = cls._enumerate_input_devices()
+        except Exception as exc:
+            log.warning("Failed to enumerate audio devices: %s", exc)
+            return None
+
+        for idx, device in enumerate(devices):
+            if int(device.get("max_input_channels", 0)) > 0:
+                return idx
+        return None
+
+    def _resolve_stream_device(self) -> int | None:
+        if self.device is not None:
+            return self.device
+
+        try:
+            devices, _, default_idx = self._enumerate_input_devices()
+        except Exception as exc:
+            log.warning("Failed to enumerate audio devices: %s", exc)
+            return None
+
+        if default_idx is not None:
+            return None
+
+        for idx, device in enumerate(devices):
+            if int(device.get("max_input_channels", 0)) > 0:
+                log.info("Using input device %s because default input is unavailable.", idx)
+                return idx
+        return None
+
     def start(self) -> None:
         if self._running:
             return
@@ -75,7 +121,7 @@ class AudioRecorder:
                 samplerate=self.sample_rate,
                 channels=self.channels,
                 dtype="int16",
-                device=self.device,
+                device=self._resolve_stream_device(),
                 callback=callback,
             )
             self._stream.start()
@@ -140,10 +186,7 @@ class AudioRecorder:
     @staticmethod
     def list_input_devices() -> list[dict[str, str | bool]]:
         try:
-            devices = sd.query_devices()
-            hostapis = sd.query_hostapis()
-            default_input = sd.query_devices(kind="input")
-            default_idx = int(default_input["index"])
+            devices, hostapis, default_idx = AudioRecorder._enumerate_input_devices()
         except Exception as exc:
             log.warning("Failed to enumerate audio devices: %s", exc)
             return []

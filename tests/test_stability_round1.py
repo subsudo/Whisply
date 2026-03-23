@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication
 from first_run_dialog import FirstRunSetupDialog, _FirstRunWorker
 from main import WhisperTypeApp, _is_cuda_fallback_oom, _should_persist_first_run_wizard
 from overlay import OverlayWidget
+from recorder import AudioRecorder
 from settings_dialog import SettingsDialog
 from transcriber import Transcriber
 from tray import AppTray
@@ -330,6 +331,72 @@ class StabilityRound1Tests(unittest.TestCase):
         self.assertFalse(_should_persist_first_run_wizard({"setup_aborted": True}))
         self.assertTrue(_should_persist_first_run_wizard({"setup_aborted": False}))
         self.assertTrue(_should_persist_first_run_wizard({}))
+
+    def test_list_input_devices_survives_missing_default_input(self) -> None:
+        devices = [
+            {"name": "Speaker", "max_input_channels": 0, "hostapi": 0},
+            {"name": "USB Mic", "max_input_channels": 1, "hostapi": 0},
+        ]
+        hostapis = [{"name": "WASAPI"}]
+
+        def fake_query_devices(device=None, kind=None):  # noqa: ANN001
+            if kind == "input":
+                raise RuntimeError("Error querying device -1")
+            if device is None:
+                return devices
+            return devices[int(device)]
+
+        with patch("recorder.sd.query_devices", side_effect=fake_query_devices), patch(
+            "recorder.sd.query_hostapis", return_value=hostapis
+        ):
+            result = AudioRecorder.list_input_devices()
+
+        self.assertEqual(
+            result,
+            [
+                {
+                    "token": "1",
+                    "label": "USB Mic (WASAPI)",
+                    "is_default": False,
+                }
+            ],
+        )
+
+    def test_recorder_start_falls_back_to_first_input_when_default_is_invalid(self) -> None:
+        devices = [
+            {"name": "Speaker", "max_input_channels": 0, "hostapi": 0},
+            {"name": "USB Mic", "max_input_channels": 1, "hostapi": 0},
+        ]
+        opened_devices: list[int | None] = []
+
+        def fake_query_devices(device=None, kind=None):  # noqa: ANN001
+            if kind == "input":
+                raise RuntimeError("Error querying device -1")
+            if device is None:
+                return devices
+            return devices[int(device)]
+
+        class _FakeStream:
+            def __init__(self, **kwargs) -> None:  # noqa: ANN003
+                opened_devices.append(kwargs.get("device"))
+
+            def start(self) -> None:
+                return None
+
+            def stop(self) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        with patch("recorder.sd.query_devices", side_effect=fake_query_devices), patch(
+            "recorder.sd.query_hostapis", return_value=[{"name": "WASAPI"}]
+        ), patch("recorder.sd.InputStream", side_effect=lambda **kwargs: _FakeStream(**kwargs)):
+            recorder = AudioRecorder()
+            recorder.start()
+
+        self.assertTrue(recorder.is_running)
+        self.assertEqual(opened_devices, [1])
 
     def test_tray_refresh_status_uses_cached_audio_snapshot(self) -> None:
         audio_provider = Mock(
