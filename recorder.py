@@ -57,6 +57,15 @@ class AudioRecorder:
         self._level_callback = callback
 
     @staticmethod
+    def _is_invalid_device_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return (
+            "invalid device" in message
+            or "error querying device -1" in message
+            or "paerrorcode -9996" in message
+        )
+
+    @staticmethod
     def _enumerate_input_devices() -> tuple[list, list, int | None]:
         devices = sd.query_devices()
         hostapis = sd.query_hostapis()
@@ -71,36 +80,37 @@ class AudioRecorder:
         return list(devices), list(hostapis), default_idx
 
     @classmethod
-    def _first_available_input_device(cls) -> int | None:
-        try:
-            devices, _, _ = cls._enumerate_input_devices()
-        except Exception as exc:
-            log.warning("Failed to enumerate audio devices: %s", exc)
-            return None
-
-        for idx, device in enumerate(devices):
-            if int(device.get("max_input_channels", 0)) > 0:
-                return idx
-        return None
-
-    def _resolve_stream_device(self) -> int | None:
-        if self.device is not None:
-            return self.device
+    def _stream_device_candidates(cls, configured_device: int | None) -> list[int | None]:
+        if configured_device is not None:
+            return [configured_device]
 
         try:
-            devices, _, default_idx = self._enumerate_input_devices()
+            devices, _, default_idx = cls._enumerate_input_devices()
         except Exception as exc:
             log.warning("Failed to enumerate audio devices: %s", exc)
-            return None
+            return [None]
+
+        input_indices = [
+            idx
+            for idx, device in enumerate(devices)
+            if int(device.get("max_input_channels", 0)) > 0
+        ]
 
         if default_idx is not None:
-            return None
+            return [None, *[idx for idx in input_indices if idx != default_idx]]
 
-        for idx, device in enumerate(devices):
-            if int(device.get("max_input_channels", 0)) > 0:
-                log.info("Using input device %s because default input is unavailable.", idx)
-                return idx
-        return None
+        for idx in input_indices:
+            log.info("Using input device %s because default input is unavailable.", idx)
+        return input_indices or [None]
+
+    @staticmethod
+    def _reinitialize_portaudio() -> None:
+        try:
+            sd._terminate()
+            sd._initialize()
+            log.info("PortAudio re-initialised after invalid audio device error.")
+        except Exception as exc:
+            log.warning("PortAudio reinit failed: %s", exc)
 
     def start(self) -> None:
         if self._running:
@@ -116,20 +126,45 @@ class AudioRecorder:
             if self._level_callback:
                 self._level_callback(_fft_band_levels(chunk))
 
-        try:
-            self._stream = sd.InputStream(
-                samplerate=self.sample_rate,
-                channels=self.channels,
-                dtype="int16",
-                device=self._resolve_stream_device(),
-                callback=callback,
-            )
-            self._stream.start()
-            self._running = True
-        except Exception as e:
-            log.error("Failed to open audio device: %s", e)
-            self._stream = None
-            self._running = False
+        last_error: Exception | None = None
+        reinit_attempted = False
+
+        for _pass in range(2):
+            candidates = self._stream_device_candidates(self.device)
+            tried_candidates: set[int | None] = set()
+
+            for candidate in candidates:
+                if candidate in tried_candidates:
+                    continue
+                tried_candidates.add(candidate)
+                try:
+                    self._stream = sd.InputStream(
+                        samplerate=self.sample_rate,
+                        channels=self.channels,
+                        dtype="int16",
+                        device=candidate,
+                        callback=callback,
+                    )
+                    self._stream.start()
+                    self._running = True
+                    return
+                except Exception as exc:
+                    last_error = exc
+                    self._stream = None
+                    self._running = False
+                    if self.device is None and candidate is not None:
+                        log.warning("Input device %s rejected by PortAudio: %s", candidate, exc)
+
+            if last_error is not None and not reinit_attempted and self._is_invalid_device_error(last_error):
+                reinit_attempted = True
+                self._reinitialize_portaudio()
+                continue
+            break
+
+        if last_error is not None:
+            log.error("Failed to open audio device: %s", last_error)
+        self._stream = None
+        self._running = False
 
     def stop(self) -> np.ndarray:
         if not self._running:

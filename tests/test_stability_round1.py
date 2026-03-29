@@ -398,6 +398,49 @@ class StabilityRound1Tests(unittest.TestCase):
         self.assertTrue(recorder.is_running)
         self.assertEqual(opened_devices, [1])
 
+    def test_recorder_tries_next_input_device_after_invalid_fallback_candidate(self) -> None:
+        devices = [
+            {"name": "Speaker", "max_input_channels": 0, "hostapi": 0},
+            {"name": "Ghost Mic", "max_input_channels": 1, "hostapi": 0},
+            {"name": "Real Mic", "max_input_channels": 1, "hostapi": 0},
+        ]
+        opened_devices: list[int | None] = []
+
+        def fake_query_devices(device=None, kind=None):  # noqa: ANN001
+            if kind == "input":
+                raise RuntimeError("Error querying device -1")
+            if device is None:
+                return devices
+            return devices[int(device)]
+
+        class _FakeStream:
+            def __init__(self, **kwargs) -> None:  # noqa: ANN003
+                device = kwargs.get("device")
+                opened_devices.append(device)
+                if device == 1:
+                    raise RuntimeError("Error opening InputStream: Invalid device [PaErrorCode -9996]")
+
+            def start(self) -> None:
+                return None
+
+            def stop(self) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        with patch("recorder.sd.query_devices", side_effect=fake_query_devices), patch(
+            "recorder.sd.query_hostapis", return_value=[{"name": "WASAPI"}]
+        ), patch("recorder.sd.InputStream", side_effect=lambda **kwargs: _FakeStream(**kwargs)), patch(
+            "recorder.AudioRecorder._reinitialize_portaudio"
+        ) as reinit:
+            recorder = AudioRecorder()
+            recorder.start()
+
+        self.assertTrue(recorder.is_running)
+        self.assertEqual(opened_devices, [1, 2])
+        reinit.assert_not_called()
+
     def test_tray_refresh_status_uses_cached_audio_snapshot(self) -> None:
         audio_provider = Mock(
             return_value=(
