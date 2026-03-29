@@ -1,6 +1,8 @@
 [Setup]
 AppName=Whisply
-AppVersion=0.1.0
+AppVersion=0.1.2
+AppVerName=Whisply 0.1.2
+VersionInfoVersion=0.1.2.0
 DefaultDirName={localappdata}\Programs\Whisply
 DefaultGroupName=Whisply
 OutputDir=dist
